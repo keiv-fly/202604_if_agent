@@ -54,6 +54,8 @@ fn ui_loop<B: ratatui::backend::Backend>(
 ) -> anyhow::Result<()> {
     let mut cells = Vec::<Cell>::new();
     let mut input = String::new();
+    let mut input_history = Vec::<String>::new();
+    let mut history_cursor: Option<usize> = None;
     let mut active_task: Option<AgentTask> = None;
     let mut last_agent_tick = Instant::now();
 
@@ -152,13 +154,46 @@ fn ui_loop<B: ratatui::backend::Backend>(
                             break;
                         }
                     }
-                    KeyCode::Char(c) => input.push(c),
+                    KeyCode::Char(c) => {
+                        history_cursor = None;
+                        input.push(c);
+                    }
                     KeyCode::Backspace => {
+                        history_cursor = None;
                         input.pop();
+                    }
+                    KeyCode::Up => {
+                        if !input_history.is_empty() {
+                            let index = match history_cursor {
+                                Some(0) => 0,
+                                Some(index) => index - 1,
+                                None => input_history.len() - 1,
+                            };
+                            history_cursor = Some(index);
+                            input = input_history[index].clone();
+                        }
+                    }
+                    KeyCode::Down => {
+                        if let Some(index) = history_cursor {
+                            if index + 1 < input_history.len() {
+                                let next_index = index + 1;
+                                history_cursor = Some(next_index);
+                                input = input_history[next_index].clone();
+                            } else {
+                                history_cursor = None;
+                                input.clear();
+                            }
+                        }
                     }
                     KeyCode::Enter => {
                         let line = input.trim().to_string();
                         input.clear();
+                        history_cursor = None;
+                        record_input_history(
+                            &mut input_history,
+                            config.ui.input_history_limit,
+                            &line,
+                        );
                         if handle_input(line, game, world, logger, &mut cells, &mut active_task)? {
                             break;
                         }
@@ -173,6 +208,18 @@ fn ui_loop<B: ratatui::backend::Backend>(
     }
 
     Ok(())
+}
+
+fn record_input_history(history: &mut Vec<String>, limit: usize, line: &str) {
+    if limit == 0 || line.is_empty() || history.last().is_some_and(|last| last == line) {
+        return;
+    }
+
+    history.push(line.to_string());
+    if history.len() > limit {
+        let drop_count = history.len().saturating_sub(limit);
+        history.drain(0..drop_count);
+    }
 }
 
 fn handle_input(

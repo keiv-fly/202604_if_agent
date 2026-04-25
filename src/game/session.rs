@@ -6,7 +6,6 @@ use runner::{Runner, RunnerError};
 
 #[derive(Debug, Clone)]
 pub struct Observation {
-    pub command: String,
     pub text: String,
 }
 
@@ -53,10 +52,7 @@ impl GameSession {
         let raw = self.runner.send_command(&command)?;
         let cleaned = clean_output(&raw);
         self.transcript.add_turn(command.clone(), cleaned.clone());
-        Ok(Observation {
-            command,
-            text: cleaned,
-        })
+        Ok(Observation { text: cleaned })
     }
 
     pub fn transcript(&self) -> &Transcript {
