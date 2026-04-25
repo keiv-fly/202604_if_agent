@@ -23,7 +23,7 @@ pub struct LlmConfig {
 
 #[derive(Debug, Clone)]
 pub struct UiConfig {
-    pub max_visible_cells: usize,
+    pub max_history_lines: usize,
     pub input_history_limit: usize,
 }
 
@@ -54,7 +54,7 @@ impl AppConfig {
                 max_tokens,
             },
             ui: UiConfig {
-                max_visible_cells: 200,
+                max_history_lines: 2_000,
                 input_history_limit: 200,
             },
         }

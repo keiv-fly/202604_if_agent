@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+arboard = "3.6.1"
 chrono = { version = "0.4", features = ["serde"] }
 crossbeam-channel = "0.5"
 crossterm = "0.27"
