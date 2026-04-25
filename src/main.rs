@@ -13,6 +13,8 @@ use crate::logging::SessionLogger;
 use crate::memory::WorldModel;
 
 fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+
     let config = AppConfig::from_env();
     let logger = SessionLogger::new()?;
 

@@ -1,7 +1,7 @@
 use crate::game::validation::validate_game_command;
 use crate::game::GameSession;
 use crate::llm::prompt::build_user_prompt;
-use crate::llm::{AgentReply, LlmClient};
+use crate::llm::{AgentReply, LlmClient, LlmResponseParseError};
 use crate::logging::SessionLogger;
 use crate::memory::WorldModel;
 
@@ -54,10 +54,15 @@ pub fn run_single_turn(
     let transcript_tail = game.transcript().render();
     let prompt = build_user_prompt(&task.prompt, &transcript_tail, world);
 
-    let reply = match llm.next_action(&prompt) {
+    let reply = match llm.next_action(&prompt, logger) {
         Ok(v) => v,
         Err(err) => {
-            events.push(AgentEvent::Failed(format!("LLM error: {err}")));
+            let message = format!("LLM error: {err}");
+            logger.log("llm_error", &message);
+            if let Some(parse_error) = err.downcast_ref::<LlmResponseParseError>() {
+                logger.log("llm_unparsed_response", parse_error.raw_response());
+            }
+            events.push(AgentEvent::Failed(message));
             return events;
         }
     };

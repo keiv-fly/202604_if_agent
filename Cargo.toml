@@ -9,6 +9,7 @@ arboard = "3.6.1"
 chrono = { version = "0.4", features = ["serde"] }
 crossbeam-channel = "0.5"
 crossterm = "0.27"
+dotenvy = "0.15.7"
 ratatui = "0.26"
 regex = "1"
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }

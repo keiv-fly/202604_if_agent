@@ -1,3 +1,4 @@
+use crate::llm::schema::AGENT_REPLY_PYDANTIC_MODEL;
 use crate::memory::WorldModel;
 
 pub const SYSTEM_PROMPT: &str = r#"You are an autonomous text-adventure agent playing Colossal Cave.
@@ -13,14 +14,11 @@ Rules:
 6. Keep updating the world model.
 7. Stop only when the task is clearly complete.
 8. Stop immediately if /cancel is requested.
-
-Return STRICT JSON ONLY.
-No markdown.
-No prose outside JSON."#;
+"#;
 
 pub fn build_user_prompt(task: &str, transcript_tail: &str, world: &WorldModel) -> String {
     format!(
-        "Task:\n{task}\n\nTranscript (recent):\n{transcript_tail}\n\nWorld memory JSON:\n{}",
+        "Task:\n{task}\n\nTranscript (recent):\n{transcript_tail}\n\nWorld memory JSON:\n{}\n\nRequired response Pydantic model:\n```python\n{AGENT_REPLY_PYDANTIC_MODEL}\n```\n\nReturn exactly one JSON object that would validate as AgentReply.",
         serde_json::to_string_pretty(world).unwrap_or_else(|_| "{}".to_string())
     )
 }
