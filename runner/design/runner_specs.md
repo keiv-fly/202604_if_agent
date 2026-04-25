@@ -57,7 +57,7 @@ or manually written `extern "C"` FFI bindings.
 # 3. Suggested directory structure
 
 ```text
-bocfel-rust-runner/
+runner/
 ├── Cargo.toml
 ├── build.rs
 ├── games/
@@ -79,16 +79,16 @@ bocfel-rust-runner/
 Rust should expose a safe wrapper like:
 
 ```rust
-pub struct BocfelRunner {
+pub struct Runner {
     raw: *mut BocfelHandle,
 }
 
-impl BocfelRunner {
-    pub fn load_story(path: &str) -> Result<Self, BocfelError>;
+impl Runner {
+    pub fn load_story(path: &str) -> Result<Self, RunnerError>;
 
-    pub fn send_command(&mut self, command: &str) -> Result<String, BocfelError>;
+    pub fn send_command(&mut self, command: &str) -> Result<String, RunnerError>;
 
-    pub fn run_commands(&mut self, commands: &[&str]) -> Result<Vec<CommandResult>, BocfelError>;
+    pub fn run_commands(&mut self, commands: &[&str]) -> Result<Vec<CommandResult>, RunnerError>;
 }
 
 pub struct CommandResult {
@@ -101,7 +101,7 @@ Example usage:
 
 ```rust
 fn main() -> anyhow::Result<()> {
-    let mut runner = BocfelRunner::load_story("games/advent.z5")?;
+    let mut runner = Runner::load_story("games/advent.z5")?;
 
     let commands = [
         "look",
@@ -273,7 +273,7 @@ fn main() {
 
 ```toml
 [package]
-name = "bocfel-rust-runner"
+name = "runner"
 version = "0.1.0"
 edition = "2021"
 
@@ -322,7 +322,7 @@ The safe Rust wrapper must:
 2. Check for null pointers.
 3. Free the Bocfel handle in `Drop`.
 4. Convert output buffer bytes back into UTF-8 safely.
-5. Return `Result<T, BocfelError>` instead of panicking.
+5. Return `Result<T, RunnerError>` instead of panicking.
 
 ---
 
@@ -331,7 +331,7 @@ The safe Rust wrapper must:
 Errors should include:
 
 ```rust
-pub enum BocfelError {
+pub enum RunnerError {
     NullHandle,
     StoryLoadFailed(String),
     CommandFailed(String),
