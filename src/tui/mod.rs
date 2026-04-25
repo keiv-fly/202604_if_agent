@@ -11,7 +11,7 @@ use crossterm::terminal::{
 };
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
 use std::io;
 use std::time::{Duration, Instant};
@@ -20,6 +20,90 @@ use std::time::{Duration, Instant};
 struct Cell {
     title: String,
     body: String,
+}
+
+fn render_cells(cells: &[Cell], width: usize) -> String {
+    let width = width.max(2);
+    cells
+        .iter()
+        .map(|cell| render_cell(cell, width))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_cell(cell: &Cell, width: usize) -> String {
+    let content_width = width.saturating_sub(2);
+    let mut lines = Vec::new();
+    lines.push(render_cell_top(&cell.title, width));
+
+    for line in cell.body.lines() {
+        for wrapped in wrap_line(line, content_width) {
+            lines.push(format!("│{wrapped:<content_width$}│"));
+        }
+    }
+
+    if cell.body.ends_with('\n') {
+        lines.push(format!("│{:<content_width$}│", ""));
+    }
+
+    lines.push(format!("└{}┘", "─".repeat(content_width)));
+    lines.join("\n")
+}
+
+fn render_cell_top(title: &str, width: usize) -> String {
+    let content_width = width.saturating_sub(2);
+    let title = format!("─ {title} ");
+    let title_len = title.chars().count();
+
+    if title_len >= content_width {
+        return format!("┌{}┐", trim_to_width(&title, content_width));
+    }
+
+    format!("┌{}{}┐", title, "─".repeat(content_width - title_len))
+}
+
+fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut remaining = line.trim_end();
+    let mut wrapped = Vec::new();
+    while remaining.chars().count() > width {
+        let mut split_at = byte_index_at_width(remaining, width);
+        let prefix = &remaining[..split_at];
+        if let Some((space_index, _)) = prefix
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| ch.is_whitespace())
+        {
+            if space_index > 0 {
+                split_at = space_index;
+            }
+        }
+
+        let segment = remaining[..split_at].trim_end();
+        wrapped.push(segment.to_string());
+        remaining = remaining[split_at..].trim_start();
+    }
+
+    wrapped.push(remaining.to_string());
+    wrapped
+}
+
+fn byte_index_at_width(value: &str, width: usize) -> usize {
+    value
+        .char_indices()
+        .nth(width)
+        .map(|(index, _)| index)
+        .unwrap_or(value.len())
+}
+
+fn trim_to_width(value: &str, width: usize) -> String {
+    value.chars().take(width).collect()
 }
 
 pub fn run_tui(
@@ -114,16 +198,9 @@ fn ui_loop<B: ratatui::backend::Backend>(
                 .constraints([Constraint::Min(4), Constraint::Length(3)])
                 .split(frame.size());
 
-            let history = cells
-                .iter()
-                .map(|c| format!("┌─ {} ─\n{}\n└────────\n", c.title, c.body))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let history = render_cells(&cells, chunks[0].width as usize);
 
-            let history_widget = Paragraph::new(history)
-                .block(Block::default().title("Cells").borders(Borders::ALL))
-                .wrap(Wrap { trim: false })
-                .style(Style::default().fg(Color::White));
+            let history_widget = Paragraph::new(history).style(Style::default().fg(Color::White));
 
             let input_widget = Paragraph::new(format!("> {input}")).block(
                 Block::default()
@@ -134,6 +211,9 @@ fn ui_loop<B: ratatui::backend::Backend>(
 
             frame.render_widget(history_widget, chunks[0]);
             frame.render_widget(input_widget, chunks[1]);
+            let cursor_x = (chunks[1].x + 3 + input.chars().count() as u16)
+                .min(chunks[1].x + chunks[1].width.saturating_sub(2));
+            frame.set_cursor(cursor_x, chunks[1].y + 1);
         })?;
 
         if event::poll(Duration::from_millis(50))? {
