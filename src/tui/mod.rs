@@ -4,7 +4,7 @@ use crate::game::{GameSession, Transcript};
 use crate::llm::LlmClient;
 use crate::logging::SessionLogger;
 use crate::memory::WorldModel;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -140,6 +140,18 @@ fn ui_loop<B: ratatui::backend::Backend>(
                     continue;
                 }
                 match key.code {
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if handle_input(
+                            "exit".to_string(),
+                            game,
+                            world,
+                            logger,
+                            &mut cells,
+                            &mut active_task,
+                        )? {
+                            break;
+                        }
+                    }
                     KeyCode::Char(c) => input.push(c),
                     KeyCode::Backspace => {
                         input.pop();

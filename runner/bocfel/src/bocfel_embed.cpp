@@ -143,19 +143,10 @@ int bocfel_send_command(
         return -1;
     }
 
-    const std::string message =
-        "Embedded Bocfel VM execution is not implemented yet. "
-        "Received command: " +
-        std::string(command);
+    std::string script = command;
+    script.push_back('\n');
 
-    if (message.size() + 1 > output_buffer_len) {
-        set_error(handle, "output buffer is too small");
-        return 1;
-    }
-
-    std::memcpy(output_buffer, message.c_str(), message.size() + 1);
-    handle->last_error.clear();
-    return 0;
+    return bocfel_run_script(handle, script.c_str(), output_buffer, output_buffer_len);
 }
 
 int bocfel_run_script(

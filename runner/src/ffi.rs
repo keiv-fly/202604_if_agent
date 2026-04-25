@@ -10,13 +10,6 @@ extern "C" {
 
     pub fn bocfel_destroy(handle: *mut BocfelHandle);
 
-    pub fn bocfel_send_command(
-        handle: *mut BocfelHandle,
-        command: *const c_char,
-        output_buffer: *mut c_char,
-        output_buffer_len: c_uint,
-    ) -> i32;
-
     pub fn bocfel_run_script(
         handle: *mut BocfelHandle,
         commands: *const c_char,

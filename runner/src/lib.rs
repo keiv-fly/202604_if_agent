@@ -6,11 +6,12 @@ use std::os::raw::c_char;
 
 use ffi::BocfelHandle;
 
-const INITIAL_OUTPUT_BUFFER_LEN: usize = 16 * 1024;
 const SCRIPT_OUTPUT_BUFFER_LEN: usize = 256 * 1024;
 
 pub struct Runner {
     raw: *mut BocfelHandle,
+    command_history: Vec<String>,
+    replay_output: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +41,11 @@ impl Runner {
             )));
         }
 
-        Ok(Self { raw })
+        Ok(Self {
+            raw,
+            command_history: Vec::new(),
+            replay_output: String::new(),
+        })
     }
 
     pub fn send_command(&mut self, command: &str) -> Result<String, RunnerError> {
@@ -48,27 +53,22 @@ impl Runner {
             return Err(RunnerError::NullHandle);
         }
 
-        let command = cstring(command)?;
-        let mut output_buffer = vec![0_u8; INITIAL_OUTPUT_BUFFER_LEN];
+        cstring(command)?;
 
-        let status = unsafe {
-            ffi::bocfel_send_command(
-                self.raw,
-                command.as_ptr(),
-                output_buffer.as_mut_ptr().cast::<c_char>(),
-                output_buffer.len() as u32,
-            )
-        };
+        let mut next_history = self.command_history.clone();
+        next_history.push(command.to_owned());
 
-        if status == 1 {
-            return Err(RunnerError::OutputTooLarge);
-        }
+        let commands = next_history
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let next_output = self.run_script(&commands)?;
+        let command_output = output_delta(&self.replay_output, &next_output).to_owned();
 
-        if status != 0 {
-            return Err(RunnerError::CommandFailed(self.last_error()));
-        }
+        self.command_history = next_history;
+        self.replay_output = next_output;
 
-        c_string_from_buffer(&output_buffer)
+        Ok(command_output)
     }
 
     pub fn run_commands(&mut self, commands: &[&str]) -> Result<Vec<CommandResult>, RunnerError> {
@@ -169,4 +169,8 @@ fn c_string_from_buffer(buffer: &[u8]) -> Result<String, RunnerError> {
         .unwrap_or(buffer.len());
 
     String::from_utf8(buffer[..len].to_vec()).map_err(|_| RunnerError::InvalidUtf8)
+}
+
+fn output_delta<'a>(previous: &str, current: &'a str) -> &'a str {
+    current.strip_prefix(previous).unwrap_or(current)
 }
