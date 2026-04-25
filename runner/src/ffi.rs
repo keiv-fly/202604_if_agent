@@ -17,5 +17,12 @@ extern "C" {
         output_buffer_len: c_uint,
     ) -> i32;
 
+    pub fn bocfel_run_script(
+        handle: *mut BocfelHandle,
+        commands: *const c_char,
+        output_buffer: *mut c_char,
+        output_buffer_len: c_uint,
+    ) -> i32;
+
     pub fn bocfel_last_error(handle: *mut BocfelHandle) -> *const c_char;
 }

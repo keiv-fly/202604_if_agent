@@ -12,11 +12,7 @@ fn main() -> Result<()> {
     let mut runner = Runner::load_story(story_path)?;
     let commands = ["look", "inventory", "north", "take lamp", "south"];
 
-    for result in runner.run_commands(&commands)? {
-        println!("> {}", result.command);
-        println!("{}", result.output);
-        println!();
-    }
+    print!("{}", runner.run_script(&commands)?);
 
     Ok(())
 }

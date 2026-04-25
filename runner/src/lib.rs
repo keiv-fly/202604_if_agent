@@ -7,6 +7,7 @@ use std::os::raw::c_char;
 use ffi::BocfelHandle;
 
 const INITIAL_OUTPUT_BUFFER_LEN: usize = 16 * 1024;
+const SCRIPT_OUTPUT_BUFFER_LEN: usize = 256 * 1024;
 
 pub struct Runner {
     raw: *mut BocfelHandle,
@@ -81,6 +82,37 @@ impl Runner {
                 })
             })
             .collect()
+    }
+
+    pub fn run_script(&mut self, commands: &[&str]) -> Result<String, RunnerError> {
+        if self.raw.is_null() {
+            return Err(RunnerError::NullHandle);
+        }
+
+        let mut script = commands.join("\n");
+        script.push('\n');
+
+        let script = cstring(&script)?;
+        let mut output_buffer = vec![0_u8; SCRIPT_OUTPUT_BUFFER_LEN];
+
+        let status = unsafe {
+            ffi::bocfel_run_script(
+                self.raw,
+                script.as_ptr(),
+                output_buffer.as_mut_ptr().cast::<c_char>(),
+                output_buffer.len() as u32,
+            )
+        };
+
+        if status == 1 {
+            return Err(RunnerError::OutputTooLarge);
+        }
+
+        if status != 0 {
+            return Err(RunnerError::CommandFailed(self.last_error()));
+        }
+
+        c_string_from_buffer(&output_buffer)
     }
 
     fn last_error(&mut self) -> String {

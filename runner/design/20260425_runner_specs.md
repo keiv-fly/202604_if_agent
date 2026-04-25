@@ -249,16 +249,19 @@ bocfel_destroy()
 
 # 9. build.rs
 
-`build.rs` should compile the Bocfel wrapper and selected Bocfel source files:
+`build.rs` should download Bocfel sources, extract them under Cargo's output
+directory, and compile the Bocfel wrapper plus selected Bocfel source files:
 
 ```rust
 fn main() {
+    let bocfel_dir = download_and_extract_bocfel();
+
     cc::Build::new()
         .cpp(true)
         .include("bocfel/include")
-        .include("bocfel/src")
+        .include(&bocfel_dir)
         .file("bocfel/src/bocfel_embed.cpp")
-        // Add required Bocfel .cpp files here.
+        // Add required Bocfel .cpp files from bocfel_dir here.
         .flag_if_supported("-std=c++17")
         .compile("bocfel_embedded");
 
