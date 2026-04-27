@@ -16,6 +16,9 @@ mod logging;
 #[allow(dead_code, unused_imports)]
 #[path = "../memory/mod.rs"]
 mod memory;
+#[allow(dead_code, unused_imports)]
+#[path = "../planner/mod.rs"]
+mod planner;
 
 use agent::AgentTask;
 use anyhow::{Context, Result, bail};
@@ -26,6 +29,9 @@ use llm::prompt::build_user_prompt;
 use llm::{LlmClient, LlmResponseParseError};
 use logging::SessionLogger;
 use memory::WorldModel;
+use planner::{
+    DfsPlanner, ObservationUpdate, PlannerDecisionKind, location_key, normalize_move_command,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -35,6 +41,7 @@ use std::io::{self, Write};
 const DEFAULT_WORLD_STATE_PATH: &str = "memory_store/world-state.json";
 const DEFAULT_FIRST_NODES_PATH: &str = "eval_data/first_nodes.json";
 const DEFAULT_RUNS: usize = 3;
+const DEFAULT_STRATEGY: EvalStrategy = EvalStrategy::Dfs;
 const DEFAULT_COMMAND: &str = "Explore to create a full map. Only use the actions to move. Do not do any other actions that are not moves.";
 
 #[derive(Debug)]
@@ -44,6 +51,15 @@ struct Args {
     world_state_path: String,
     first_nodes_path: String,
     command: String,
+    strategy: EvalStrategy,
+    dfs_max_turns: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum EvalStrategy {
+    Dfs,
+    LlmAgent,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +82,12 @@ struct FirstNode {
 #[derive(Debug, Serialize)]
 struct EvalRun {
     run: usize,
+    strategy: EvalStrategy,
+    planner_turns: usize,
+    generated_command_plans: usize,
+    executed_movement_commands: usize,
+    failed_moves: usize,
+    frontier_counts: HashMap<String, usize>,
     share_of_titles_found: f64,
     share_of_titles_found_info: String,
     share_of_titles_and_descriptions: f64,
@@ -75,6 +97,7 @@ struct EvalRun {
 #[derive(Debug, Serialize)]
 struct EvalOutput {
     command: String,
+    strategy: EvalStrategy,
     requested_runs: usize,
     calculation_only: bool,
     runs: Vec<EvalRun>,
@@ -117,6 +140,12 @@ fn main() -> Result<()> {
         );
         runs.push(EvalRun {
             run: 1,
+            strategy: args.strategy,
+            planner_turns: 0,
+            generated_command_plans: 0,
+            executed_movement_commands: 0,
+            failed_moves: 0,
+            frontier_counts: HashMap::new(),
             share_of_titles_found: scores.share_of_titles_found,
             share_of_titles_found_info: scores.share_of_titles_found_info,
             share_of_titles_and_descriptions: scores.share_of_titles_and_descriptions,
@@ -129,9 +158,9 @@ fn main() -> Result<()> {
                 &format!("Starting eval run {run}/{}...", args.runs),
             );
             logger.log("eval_run_start", &format!("run={run}/{}", args.runs));
-            let world = run_program(&args.command, &logger)
+            let run_result = run_program(&args.command, args.strategy, args.dfs_max_turns, &logger)
                 .with_context(|| format!("failed during eval run {run}"))?;
-            let scores = score_world_model(&world, &first_nodes);
+            let scores = score_world_model(&run_result.world, &first_nodes);
             logger.log(
                 "eval_run_score",
                 &format!(
@@ -141,6 +170,12 @@ fn main() -> Result<()> {
             );
             runs.push(EvalRun {
                 run,
+                strategy: args.strategy,
+                planner_turns: run_result.planner_turns,
+                generated_command_plans: run_result.generated_command_plans,
+                executed_movement_commands: run_result.executed_movement_commands,
+                failed_moves: run_result.failed_moves,
+                frontier_counts: run_result.frontier_counts,
                 share_of_titles_found: scores.share_of_titles_found,
                 share_of_titles_found_info: scores.share_of_titles_found_info,
                 share_of_titles_and_descriptions: scores.share_of_titles_and_descriptions,
@@ -151,6 +186,7 @@ fn main() -> Result<()> {
 
     let output = EvalOutput {
         command: args.command,
+        strategy: args.strategy,
         requested_runs: args.runs,
         calculation_only: args.calculate_only,
         average_share_of_titles_found: average_titles(&runs),
@@ -173,6 +209,8 @@ impl Args {
         let mut world_state_path = DEFAULT_WORLD_STATE_PATH.to_string();
         let mut first_nodes_path = DEFAULT_FIRST_NODES_PATH.to_string();
         let mut command = DEFAULT_COMMAND.to_string();
+        let mut strategy = DEFAULT_STRATEGY;
+        let mut dfs_max_turns = AgentTask::new(String::new()).max_turns;
         let mut positional = Vec::new();
         let mut args = env::args().skip(1);
 
@@ -198,6 +236,16 @@ impl Args {
                 "--command" | "--prompt" => {
                     command = args.next().context("--command requires a value")?;
                 }
+                "--strategy" => {
+                    let value = args.next().context("--strategy requires a value")?;
+                    strategy = EvalStrategy::parse(&value)?;
+                }
+                "--dfs-max-turns" => {
+                    let value = args.next().context("--dfs-max-turns requires a value")?;
+                    dfs_max_turns = value
+                        .parse()
+                        .with_context(|| format!("invalid --dfs-max-turns value '{value}'"))?;
+                }
                 value if value.starts_with('-') => bail!("unknown argument '{value}'"),
                 value => positional.push(value.to_string()),
             }
@@ -205,6 +253,9 @@ impl Args {
 
         if runs == 0 {
             bail!("--runs must be at least 1");
+        }
+        if dfs_max_turns == 0 {
+            bail!("--dfs-max-turns must be at least 1");
         }
         if let Some(path) = positional.first() {
             world_state_path = path.clone();
@@ -222,7 +273,19 @@ impl Args {
             world_state_path,
             first_nodes_path,
             command,
+            strategy,
+            dfs_max_turns,
         })
+    }
+}
+
+impl EvalStrategy {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "dfs" => Ok(Self::Dfs),
+            "llm-agent" => Ok(Self::LlmAgent),
+            _ => bail!("unknown --strategy '{value}', expected 'dfs' or 'llm-agent'"),
+        }
     }
 }
 
@@ -235,17 +298,33 @@ Options:\n\
       --calculate-only        Read the world-state file and calculate scores without running\n\
       --world-state <PATH>    World-state path for --calculate-only\n\
       --first-nodes <PATH>    Expected first-nodes path (default: {DEFAULT_FIRST_NODES_PATH})\n\
+      --strategy <STRATEGY>   Eval strategy: dfs or llm-agent (default: dfs)\n\
+      --dfs-max-turns <N>     DFS strategy turn cap (default: 30)\n\
       --command <TEXT>        Agent command/prompt to run (default: {DEFAULT_COMMAND:?})\n\
   -h, --help                  Show this help"
     );
 }
 
-fn run_program(command: &str, logger: &SessionLogger) -> Result<WorldModel> {
+#[derive(Debug)]
+struct RunResult {
+    world: WorldModel,
+    planner_turns: usize,
+    generated_command_plans: usize,
+    executed_movement_commands: usize,
+    failed_moves: usize,
+    frontier_counts: HashMap<String, usize>,
+}
+
+fn run_program(
+    command: &str,
+    strategy: EvalStrategy,
+    dfs_max_turns: usize,
+    logger: &SessionLogger,
+) -> Result<RunResult> {
     let config = AppConfig::from_env();
     let mut game = GameSession::load(&config.game.story_path)
         .map_err(|e| anyhow::anyhow!("failed to load story '{}': {e}", config.game.story_path))?;
     let mut world = WorldModel::default();
-    let llm = LlmClient::new(config.llm.clone());
 
     let initial_observation = game
         .execute("look")
@@ -254,16 +333,159 @@ fn run_program(command: &str, logger: &SessionLogger) -> Result<WorldModel> {
     print_game_output(&initial_observation.text);
     world.update_from_observation(&initial_observation.text);
 
+    match strategy {
+        EvalStrategy::Dfs => run_dfs_strategy(command, dfs_max_turns, &mut game, world, logger),
+        EvalStrategy::LlmAgent => {
+            let llm = LlmClient::new(config.llm.clone());
+            run_llm_agent_strategy(command, &mut game, world, &llm, logger)
+        }
+    }
+}
+
+fn run_llm_agent_strategy(
+    command: &str,
+    game: &mut GameSession,
+    mut world: WorldModel,
+    llm: &LlmClient,
+    logger: &SessionLogger,
+) -> Result<RunResult> {
     let mut task = AgentTask::new(command.to_string());
     loop {
-        let is_finished = run_eval_turn(&mut task, &mut game, &mut world, &llm, &logger);
+        let is_finished = run_eval_turn(&mut task, game, &mut world, llm, logger);
 
         if is_finished || task.turns >= task.max_turns {
             break;
         }
     }
 
-    Ok(world)
+    Ok(RunResult {
+        world,
+        planner_turns: 0,
+        generated_command_plans: 0,
+        executed_movement_commands: 0,
+        failed_moves: 0,
+        frontier_counts: HashMap::new(),
+    })
+}
+
+fn run_dfs_strategy(
+    _command: &str,
+    max_turns: usize,
+    game: &mut GameSession,
+    mut world: WorldModel,
+    logger: &SessionLogger,
+) -> Result<RunResult> {
+    let mut planner = DfsPlanner::new(&world);
+
+    loop {
+        if planner.stats.turns >= max_turns {
+            print_eval_message(
+                logger,
+                "Stopping DFS strategy due to max-turn safety guard.",
+            );
+            break;
+        }
+
+        let decision = planner.decide(&world);
+        logger.log("planner_decision", &format!("{decision:?}"));
+
+        match decision.kind {
+            PlannerDecisionKind::CommandPlan => {
+                let plan = decision
+                    .plan
+                    .context("planner returned CommandPlan without a plan")?;
+                for command in &plan.commands {
+                    validate_game_command(command)
+                        .with_context(|| format!("invalid DFS command '{command}'"))?;
+                    if normalize_move_command(command).as_deref() != Some(command.as_str()) {
+                        bail!("DFS command '{command}' is not canonical movement");
+                    }
+                }
+
+                let command = plan
+                    .commands
+                    .first()
+                    .context("planner returned empty command plan")?
+                    .clone();
+                let action_id = if plan.route_commands.is_empty() {
+                    Some(plan.selected_frontier_action_id.clone())
+                } else {
+                    None
+                };
+
+                print_agent_input(&command);
+                logger.log(
+                    "planner_command",
+                    &format!(
+                        "command={command} selected={} route_len={} reason={}",
+                        plan.selected_frontier_action_id,
+                        plan.route_commands.len(),
+                        plan.reason
+                    ),
+                );
+
+                let previous_location = location_key(&world);
+                let command_result = game.execute(&command);
+                let command_failed = command_result.is_err();
+                let observation = match command_result {
+                    Ok(observation) => observation.text,
+                    Err(err) => {
+                        print_eval_message(logger, &format!("game command failed: {err}"));
+                        String::new()
+                    }
+                };
+
+                if !observation.is_empty() {
+                    world.update_from_observation(&observation);
+                }
+                world.apply_command_result(&previous_location, &command, command_failed);
+                logger.log("game_output", &observation);
+                print_game_output(&observation);
+
+                let classification = planner.apply_observation(
+                    ObservationUpdate {
+                        previous_location,
+                        current_location: location_key(&world),
+                        command,
+                        command_failed,
+                        action_id,
+                    },
+                    &world,
+                );
+                logger.log(
+                    "planner_observation_classification",
+                    &format!("{classification:?}"),
+                );
+            }
+            PlannerDecisionKind::Complete => {
+                print_eval_message(logger, &format!("DFS complete: {}", decision.reason));
+                break;
+            }
+            PlannerDecisionKind::Blocked => {
+                print_eval_message(logger, &format!("DFS blocked: {}", decision.reason));
+                break;
+            }
+        }
+    }
+
+    let frontier_counts = planner
+        .frontier_counts()
+        .into_iter()
+        .map(|(status, count)| (status.to_string(), count))
+        .collect();
+    let frontier_path = logger.llm_dir().join("dfs_frontier.json");
+    let frontier_json = serde_json::to_string_pretty(planner.frontier())
+        .context("serialize dfs frontier to JSON")?;
+    fs::write(&frontier_path, &frontier_json)
+        .with_context(|| format!("write {}", frontier_path.display()))?;
+    Ok(RunResult {
+        world,
+        planner_turns: planner.stats.turns,
+        generated_command_plans: planner.stats.generated_command_plans,
+        executed_movement_commands: planner.stats.executed_movement_commands,
+        failed_moves: planner.stats.failed_moves,
+        frontier_counts,
+    })
 }
 
 fn run_eval_turn(
@@ -368,28 +590,6 @@ fn run_eval_turn(
     task.turns += 1;
 
     false
-}
-
-fn normalize_move_command(command: &str) -> Option<String> {
-    let mut normalized = command.trim().to_lowercase();
-    if let Some(stripped) = normalized.strip_prefix("go ") {
-        normalized = stripped.trim().to_string();
-    }
-    match normalized.as_str() {
-        "north" | "n" => Some("north".to_string()),
-        "south" | "s" => Some("south".to_string()),
-        "east" | "e" => Some("east".to_string()),
-        "west" | "w" => Some("west".to_string()),
-        "northeast" | "ne" => Some("northeast".to_string()),
-        "northwest" | "nw" => Some("northwest".to_string()),
-        "southeast" | "se" => Some("southeast".to_string()),
-        "southwest" | "sw" => Some("southwest".to_string()),
-        "up" | "u" => Some("up".to_string()),
-        "down" | "d" => Some("down".to_string()),
-        "in" | "inside" | "enter" | "enter building" | "enter cave" => Some("in".to_string()),
-        "out" | "outside" | "exit" => Some("out".to_string()),
-        _ => None,
-    }
 }
 
 fn print_game_output(text: &str) {
