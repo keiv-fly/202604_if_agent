@@ -16,9 +16,15 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new(config: LlmConfig) -> Self {
+        let client = Client::builder()
+            .user_agent("if-agent/0.2.1")
+            .http1_only()
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
         Self {
             config,
-            client: Client::new(),
+            client,
         }
     }
 
@@ -49,7 +55,7 @@ impl LlmClient {
             let response = self
                 .client
                 .post(&self.config.base_url)
-                .bearer_auth(&self.config.api_key)
+                .bearer_auth(self.config.api_key.trim())
                 .header("HTTP-Referer", "https://local.if-agent")
                 .header("X-Title", "if-agent")
                 .json(&payload)
@@ -66,10 +72,11 @@ impl LlmClient {
         let value: serde_json::Value = match response_result {
             Ok(value) => value,
             Err(err) => {
-                logger.write_llm_artifact(call_number, "error.txt", &err.to_string());
+                let err_with_chain = format_error_chain(&err);
+                logger.write_llm_artifact(call_number, "error.txt", &err_with_chain);
                 logger.log(
                     "llm_call",
-                    &compact_error_summary(call_number, user_prompt, logger, &err.to_string()),
+                    &compact_error_summary(call_number, user_prompt, logger, &err_with_chain),
                 );
                 return Err(err);
             }
@@ -208,4 +215,17 @@ fn compact_error_summary(
         error,
         logger.llm_dir().display(),
     )
+}
+
+fn format_error_chain(err: &anyhow::Error) -> String {
+    let mut output = String::new();
+
+    for (index, cause) in err.chain().enumerate() {
+        if index > 0 {
+            output.push_str(" | caused by: ");
+        }
+        output.push_str(&cause.to_string());
+    }
+
+    output
 }
