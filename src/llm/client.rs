@@ -18,7 +18,6 @@ impl LlmClient {
     pub fn new(config: LlmConfig) -> Self {
         let client = Client::builder()
             .user_agent("if-agent/0.2.1")
-            .http1_only()
             .build()
             .unwrap_or_else(|_| Client::new());
 
