@@ -51,8 +51,7 @@ pub fn run_single_turn(
         return events;
     }
 
-    let transcript_tail = game.transcript().render();
-    let prompt = build_user_prompt(&task.prompt, &transcript_tail, world);
+    let prompt = build_user_prompt(&task.prompt, world);
 
     let reply = match llm.next_action(&prompt, logger) {
         Ok(v) => v,
@@ -120,16 +119,24 @@ fn apply_reply(
     events.push(AgentEvent::Action(command.clone()));
     logger.log("agent_action", &command);
 
+    let previous_location = world.current_location.clone();
     let obs = match game.execute(&command) {
         Ok(obs) => obs.text,
         Err(e) => {
+            world.apply_command_result(&previous_location, &command, true);
             events.push(AgentEvent::Failed(format!("game command failed: {e}")));
             return;
         }
     };
 
     world.update_from_observation(&obs);
-    world.task_notes.extend(reply.memory_update.notes);
+    world.apply_command_result(&previous_location, &command, false);
+    world.apply_llm_memory(
+        &reply.memory_update.location,
+        &reply.memory_update.new_exits,
+        &reply.memory_update.new_objects,
+        &reply.memory_update.notes,
+    );
     logger.log("game_output", &obs);
     events.push(AgentEvent::Observation(obs));
 }
