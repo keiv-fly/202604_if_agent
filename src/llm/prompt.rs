@@ -16,9 +16,10 @@ Rules:
 8. Stop immediately if /cancel is requested.
 "#;
 
-pub fn build_user_prompt(task: &str, transcript_tail: &str, world: &WorldModel) -> String {
+pub fn build_user_prompt(task: &str, world: &WorldModel) -> String {
+    let frontier = world.frontier_summary();
     format!(
-        "Task:\n{task}\n\nTranscript (recent):\n{transcript_tail}\n\nWorld memory JSON:\n{}\n\nRequired response Pydantic model:\n```python\n{AGENT_REPLY_PYDANTIC_MODEL}\n```\n\nReturn exactly one JSON object that would validate as AgentReply.",
+        "Task:\n{task}\n\nCompact frontier:\n{frontier}\n\nWorld memory JSON:\n{}\n\nRequired response Pydantic model:\n```python\n{AGENT_REPLY_PYDANTIC_MODEL}\n```\n\nReturn exactly one JSON object that would validate as AgentReply.",
         serde_json::to_string_pretty(world).unwrap_or_else(|_| "{}".to_string())
     )
 }

@@ -283,8 +283,7 @@ fn run_eval_turn(
         return true;
     }
 
-    let transcript_tail = game.transcript().render();
-    let prompt = build_user_prompt(&task.prompt, &transcript_tail, world);
+    let prompt = build_user_prompt(&task.prompt, world);
     let reply = match llm.next_action(&prompt, logger) {
         Ok(value) => value,
         Err(err) => {
@@ -346,16 +345,24 @@ fn run_eval_turn(
     print_agent_input(&command);
     logger.log("agent_action", &command);
 
+    let previous_location = world.current_location.clone();
     let observation = match game.execute(&command) {
         Ok(observation) => observation.text,
         Err(err) => {
+            world.apply_command_result(&previous_location, &command, true);
             print_eval_message(logger, &format!("game command failed: {err}"));
             return true;
         }
     };
 
     world.update_from_observation(&observation);
-    world.task_notes.extend(reply.memory_update.notes);
+    world.apply_command_result(&previous_location, &command, false);
+    world.apply_llm_memory(
+        &reply.memory_update.location,
+        &reply.memory_update.new_exits,
+        &reply.memory_update.new_objects,
+        &reply.memory_update.notes,
+    );
     logger.log("game_output", &observation);
     print_game_output(&observation);
     task.turns += 1;
