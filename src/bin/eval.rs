@@ -35,8 +35,7 @@ use std::io::{self, Write};
 const DEFAULT_WORLD_STATE_PATH: &str = "memory_store/world-state.json";
 const DEFAULT_FIRST_NODES_PATH: &str = "eval_data/first_nodes.json";
 const DEFAULT_RUNS: usize = 3;
-const DEFAULT_COMMAND: &str =
-    "Explore to create a full map. Only use the actions to move. Do not do any other actions that are not moves.";
+const DEFAULT_COMMAND: &str = "Explore to create a full map. Only use the actions to move. Do not do any other actions that are not moves.";
 
 #[derive(Debug)]
 struct Args {
@@ -88,11 +87,30 @@ fn main() -> Result<()> {
 
     let args = Args::parse()?;
     let first_nodes = read_json::<HashMap<String, FirstNode>>(&args.first_nodes_path)?;
+    let logger = SessionLogger::new_in("logs_eval")?;
+    logger.log(
+        "eval_start",
+        &format!(
+            "runs={} calculate_only={} world_state={} first_nodes={} command={:?}",
+            args.runs,
+            args.calculate_only,
+            args.world_state_path,
+            args.first_nodes_path,
+            args.command
+        ),
+    );
     let mut runs = Vec::new();
 
     if args.calculate_only {
         let world_state = read_json::<WorldState>(&args.world_state_path)?;
         let scores = score_world_state(&world_state, &first_nodes);
+        logger.log(
+            "eval_run_score",
+            &format!(
+                "run=1 titles={} title_descriptions={}",
+                scores.share_of_titles_found, scores.share_of_titles_and_descriptions
+            ),
+        );
         runs.push(EvalRun {
             run: 1,
             share_of_titles_found: scores.share_of_titles_found,
@@ -102,10 +120,21 @@ fn main() -> Result<()> {
         });
     } else {
         for run in 1..=args.runs {
-            println!("eval>Starting eval run {run}/{}...", args.runs);
-            let world = run_program(&args.command)
+            print_eval_message(
+                &logger,
+                &format!("Starting eval run {run}/{}...", args.runs),
+            );
+            logger.log("eval_run_start", &format!("run={run}/{}", args.runs));
+            let world = run_program(&args.command, &logger)
                 .with_context(|| format!("failed during eval run {run}"))?;
             let scores = score_world_model(&world, &first_nodes);
+            logger.log(
+                "eval_run_score",
+                &format!(
+                    "run={run} titles={} title_descriptions={}",
+                    scores.share_of_titles_found, scores.share_of_titles_and_descriptions
+                ),
+            );
             runs.push(EvalRun {
                 run,
                 share_of_titles_found: scores.share_of_titles_found,
@@ -126,7 +155,9 @@ fn main() -> Result<()> {
     };
 
     io::stdout().flush()?;
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    let output_json = serde_json::to_string_pretty(&output)?;
+    logger.log("eval_result", &output_json);
+    println!("{output_json}");
 
     Ok(())
 }
@@ -205,9 +236,8 @@ Options:\n\
     );
 }
 
-fn run_program(command: &str) -> Result<WorldModel> {
+fn run_program(command: &str, logger: &SessionLogger) -> Result<WorldModel> {
     let config = AppConfig::from_env();
-    let logger = SessionLogger::new()?;
     let mut game = GameSession::load(&config.game.story_path)
         .map_err(|e| anyhow::anyhow!("failed to load story '{}': {e}", config.game.story_path))?;
     let mut world = WorldModel::default();
@@ -216,6 +246,7 @@ fn run_program(command: &str) -> Result<WorldModel> {
     let initial_observation = game
         .execute("look")
         .map_err(|e| anyhow::anyhow!("failed to run initial look command: {e}"))?;
+    logger.log("game_output", &initial_observation.text);
     print_game_output(&initial_observation.text);
     world.update_from_observation(&initial_observation.text);
 
@@ -238,10 +269,13 @@ fn run_eval_turn(
     llm: &LlmClient,
     logger: &SessionLogger,
 ) -> bool {
-    let movement_only_mode = task.prompt.to_lowercase().contains("only use the actions to move");
+    let movement_only_mode = task
+        .prompt
+        .to_lowercase()
+        .contains("only use the actions to move");
 
     if task.turns >= task.max_turns {
-        println!("eval>Stopping task due to max-turn safety guard.");
+        print_eval_message(logger, "Stopping task due to max-turn safety guard.");
         return true;
     }
 
@@ -255,34 +289,36 @@ fn run_eval_turn(
             if let Some(parse_error) = err.downcast_ref::<LlmResponseParseError>() {
                 logger.log("llm_unparsed_response", parse_error.raw_response());
             }
-            println!("eval>{message}");
+            print_eval_message(logger, &message);
             return true;
         }
     };
 
     logger.log("agent_thought", &reply.thought);
     if reply.task_status.complete {
-        println!("eval>{}", reply.task_status.summary);
+        print_eval_message(logger, &reply.task_status.summary);
         return true;
     }
 
     if reply.action.action_type != "game_command" {
-        println!("eval>invalid action type from LLM");
+        print_eval_message(logger, "invalid action type from LLM");
         return true;
     }
 
     let mut command = match validate_game_command(&reply.action.command) {
         Ok(command) => command,
         Err(err) => {
-            println!("agent>{}", reply.action.command);
-            println!("eval>invalid command from LLM: {err}");
+            logger.log("agent_action", &reply.action.command);
+            print_agent_input(&reply.action.command);
+            print_eval_message(logger, &format!("invalid command from LLM: {err}"));
             return true;
         }
     };
     if movement_only_mode {
         let Some(normalized) = normalize_move_command(&command) else {
-            println!("agent>{command}");
-            println!("eval>ignored non-movement command in movement-only mode");
+            logger.log("agent_action", &command);
+            print_agent_input(&command);
+            print_eval_message(logger, "ignored non-movement command in movement-only mode");
             task.turns += 1;
             return false;
         };
@@ -297,8 +333,9 @@ fn run_eval_turn(
     task.last_command = Some(command.clone());
 
     if task.repeated_guard >= 2 {
-        println!("agent>{command}");
-        println!("eval>loop guard: same command repeated too many times");
+        logger.log("agent_action", &command);
+        print_agent_input(&command);
+        print_eval_message(logger, "loop guard: same command repeated too many times");
         return true;
     }
 
@@ -308,7 +345,7 @@ fn run_eval_turn(
     let observation = match game.execute(&command) {
         Ok(observation) => observation.text,
         Err(err) => {
-            println!("eval>game command failed: {err}");
+            print_eval_message(logger, &format!("game command failed: {err}"));
             return true;
         }
     };
@@ -345,22 +382,42 @@ fn normalize_move_command(command: &str) -> Option<String> {
 }
 
 fn print_game_output(text: &str) {
-    print_prefixed_lines("game>", text);
+    print_tagged_block("game", text);
 }
 
 fn print_agent_input(text: &str) {
-    print_prefixed_lines("agent>", text);
+    print_prefixed_lines("agent> ", text);
+}
+
+fn print_eval_message(logger: &SessionLogger, text: &str) {
+    logger.log("eval_output", text);
+    println!("eval>{text}");
+    let _ = io::stdout().flush();
+}
+
+fn print_tagged_block(tag: &str, text: &str) {
+    println!("<{tag}>");
+    if !text.is_empty() {
+        print!("{text}");
+        if !text.ends_with('\n') {
+            println!();
+        }
+    }
+    println!("</{tag}>");
+    let _ = io::stdout().flush();
 }
 
 fn print_prefixed_lines(prefix: &str, text: &str) {
     if text.is_empty() {
         println!("{prefix}");
+        let _ = io::stdout().flush();
         return;
     }
 
     for line in text.lines() {
         println!("{prefix}{line}");
     }
+    let _ = io::stdout().flush();
 }
 
 #[derive(Debug)]

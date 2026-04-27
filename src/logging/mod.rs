@@ -1,7 +1,7 @@
 use chrono::Utc;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -14,10 +14,14 @@ pub struct SessionLogger {
 
 impl SessionLogger {
     pub fn new() -> anyhow::Result<Self> {
-        fs::create_dir_all("logs")?;
-        let stamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
-        let path = PathBuf::from(format!("logs/agent-session-{stamp}.txt"));
-        let llm_dir = PathBuf::from("logs").join(&stamp);
+        Self::new_in("logs")
+    }
+
+    pub fn new_in(root: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let root = root.as_ref();
+        fs::create_dir_all(root)?;
+        let base_stamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let (path, llm_dir) = unique_session_paths(root, &base_stamp);
         fs::create_dir_all(&llm_dir)?;
 
         Ok(Self {
@@ -66,4 +70,22 @@ impl SessionLogger {
         let contents = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
         self.write_llm_artifact(call_number, name, &contents);
     }
+}
+
+fn unique_session_paths(root: &Path, base_stamp: &str) -> (PathBuf, PathBuf) {
+    for suffix in 0.. {
+        let stamp = if suffix == 0 {
+            base_stamp.to_string()
+        } else {
+            format!("{base_stamp}-{suffix}")
+        };
+        let path = root.join(format!("agent-session-{stamp}.txt"));
+        let llm_dir = root.join(&stamp);
+
+        if !path.exists() && !llm_dir.exists() {
+            return (path, llm_dir);
+        }
+    }
+
+    unreachable!("unbounded session suffix search should always return")
 }

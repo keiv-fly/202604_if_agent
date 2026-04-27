@@ -22,5 +22,6 @@ target
 
 .env
 logs
+logs_eval
 memory_store
 transcripts

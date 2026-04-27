@@ -7,6 +7,10 @@ use reqwest::blocking::Client;
 use serde_json::json;
 use std::error::Error;
 use std::fmt;
+use std::thread;
+use std::time::Duration;
+
+const LLM_MAX_RETRIES: usize = 3;
 
 #[derive(Clone)]
 pub struct LlmClient {
@@ -18,13 +22,11 @@ impl LlmClient {
     pub fn new(config: LlmConfig) -> Self {
         let client = Client::builder()
             .user_agent("if-agent/0.2.1")
+            .timeout(Duration::from_secs(150))
             .build()
             .unwrap_or_else(|_| Client::new());
 
-        Self {
-            config,
-            client,
-        }
+        Self { config, client }
     }
 
     pub fn disabled(&self) -> bool {
@@ -36,7 +38,6 @@ impl LlmClient {
             return Err(anyhow!("OPENROUTER_API_KEY is not set"));
         }
 
-        let call_number = logger.next_llm_call_number();
         let payload = json!({
             "model": self.config.model,
             "temperature": self.config.temperature,
@@ -47,9 +48,46 @@ impl LlmClient {
             ],
             "response_format": agent_reply_response_format()
         });
-        logger.write_llm_artifact(call_number, "prompt.txt", user_prompt);
-        logger.write_llm_json_artifact(call_number, "request.json", &payload);
 
+        for attempt in 1..=LLM_MAX_RETRIES + 1 {
+            let call_number = logger.next_llm_call_number();
+            logger.write_llm_artifact(call_number, "prompt.txt", user_prompt);
+            logger.write_llm_json_artifact(call_number, "request.json", &payload);
+
+            match self.next_action_attempt(user_prompt, logger, call_number, &payload) {
+                Ok(reply) => return Ok(reply),
+                Err(err) => {
+                    let err_with_chain = format_error_chain(&err);
+                    logger.write_llm_artifact(call_number, "error.txt", &err_with_chain);
+                    logger.log(
+                        "llm_call",
+                        &compact_error_summary(call_number, user_prompt, logger, &err_with_chain),
+                    );
+
+                    if attempt <= LLM_MAX_RETRIES {
+                        logger.log(
+                            "llm_retry",
+                            &compact_retry_summary(call_number, attempt, &err_with_chain),
+                        );
+                        thread::sleep(Duration::from_secs(attempt as u64));
+                        continue;
+                    }
+
+                    return Err(err);
+                }
+            }
+        }
+
+        unreachable!("retry loop should return after success or final error")
+    }
+
+    fn next_action_attempt(
+        &self,
+        user_prompt: &str,
+        logger: &SessionLogger,
+        call_number: usize,
+        payload: &serde_json::Value,
+    ) -> Result<AgentReply> {
         let response_result: Result<serde_json::Value> = (|| {
             let response = self
                 .client
@@ -60,38 +98,31 @@ impl LlmClient {
                 .json(&payload)
                 .send()
                 .context("failed to call OpenRouter")?;
-            let response = response
-                .error_for_status()
-                .context("OpenRouter returned error status")?;
+            let status = response.status();
+            let response_text = response
+                .text()
+                .context("failed to read OpenRouter response body")?;
 
-            response
-                .json()
-                .context("failed to decode OpenRouter response")
-        })();
-        let value: serde_json::Value = match response_result {
-            Ok(value) => value,
-            Err(err) => {
-                let err_with_chain = format_error_chain(&err);
-                logger.write_llm_artifact(call_number, "error.txt", &err_with_chain);
-                logger.log(
-                    "llm_call",
-                    &compact_error_summary(call_number, user_prompt, logger, &err_with_chain),
-                );
-                return Err(err);
+            if !status.is_success() {
+                logger.write_llm_artifact(call_number, "response.txt", &response_text);
+                return Err(anyhow!("OpenRouter returned error status {status}"));
             }
-        };
-        logger.write_llm_json_artifact(call_number, "response.json", &value);
 
+            let value = match serde_json::from_str::<serde_json::Value>(&response_text) {
+                Ok(value) => value,
+                Err(err) => {
+                    logger.write_llm_artifact(call_number, "response.txt", &response_text);
+                    return Err(err).context("failed to decode OpenRouter response");
+                }
+            };
+            logger.write_llm_json_artifact(call_number, "response.json", &value);
+            Ok(value)
+        })();
+        let value: serde_json::Value = response_result?;
         let content = match value["choices"][0]["message"]["content"].as_str() {
             Some(content) => content,
             None => {
-                let err = anyhow!("missing content in OpenRouter response");
-                logger.write_llm_artifact(call_number, "error.txt", &err.to_string());
-                logger.log(
-                    "llm_call",
-                    &compact_error_summary(call_number, user_prompt, logger, &err.to_string()),
-                );
-                return Err(err);
+                return Err(anyhow!("missing content in OpenRouter response"));
             }
         };
         if let Ok(answer_json) = extract_reply_json(content) {
@@ -103,11 +134,6 @@ impl LlmClient {
         let reply = match parse_reply(content) {
             Ok(reply) => reply,
             Err(err) => {
-                logger.write_llm_artifact(call_number, "error.txt", &err.to_string());
-                logger.log(
-                    "llm_call",
-                    &compact_error_summary(call_number, user_prompt, logger, &err.to_string()),
-                );
                 return Err(err);
             }
         };
@@ -214,6 +240,10 @@ fn compact_error_summary(
         error,
         logger.llm_dir().display(),
     )
+}
+
+fn compact_retry_summary(call_number: usize, attempt: usize, error: &str) -> String {
+    format!("#{call_number:03} retry={attempt}/{LLM_MAX_RETRIES} retrying_after_error={error:?}")
 }
 
 fn format_error_chain(err: &anyhow::Error) -> String {

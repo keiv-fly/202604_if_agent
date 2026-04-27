@@ -67,8 +67,7 @@ impl GameSession {
 fn is_movement_command(command: &str) -> bool {
     matches!(
         command.trim().to_lowercase().as_str(),
-        "n"
-            | "s"
+        "n" | "s"
             | "e"
             | "w"
             | "ne"
