@@ -25,6 +25,23 @@ fn append_history_cell(history_lines: &mut Vec<String>, title: &str, body: &str,
     history_lines.extend(render_cell_lines(title, body, width));
 }
 
+fn append_agent_cell(
+    history_lines: &mut Vec<String>,
+    thought: Option<&str>,
+    action: Option<&str>,
+    width: usize,
+) {
+    let mut sections = Vec::new();
+    if let Some(thought) = thought {
+        sections.push(format!("Thought:\n{thought}"));
+    }
+    if let Some(action) = action {
+        sections.push(format!("Action:\n{action}"));
+    }
+
+    append_history_cell(history_lines, "AGENT", &sections.join("\n\n"), width);
+}
+
 fn render_cell_lines(title: &str, body: &str, width: usize) -> Vec<String> {
     let width = width.max(2);
     let content_width = width.saturating_sub(2);
@@ -200,6 +217,7 @@ fn ui_loop<B: ratatui::backend::Backend>(
     let mut input_history = Vec::<String>::new();
     let mut history_cursor: Option<usize> = None;
     let mut active_task: Option<AgentTask> = None;
+    let mut pending_agent_thought: Option<String> = None;
     let mut last_agent_tick = Instant::now();
 
     if let Ok(obs) = game.execute("look") {
@@ -216,25 +234,50 @@ fn ui_loop<B: ratatui::backend::Backend>(
             if last_agent_tick.elapsed() >= Duration::from_millis(150) {
                 for ev in run_single_turn(task, game, world, llm, logger) {
                     match ev {
-                        AgentEvent::Thought(t) => append_history_cell(
-                            &mut history_lines,
-                            "AGENT",
-                            &format!("Thought:\n{t}"),
-                            history_area_width,
-                        ),
-                        AgentEvent::Action(a) => append_history_cell(
-                            &mut history_lines,
-                            "AGENT",
-                            &format!("Action:\n{a}"),
-                            history_area_width,
-                        ),
-                        AgentEvent::Observation(o) => append_history_cell(
-                            &mut history_lines,
-                            "GAME OUTPUT",
-                            &o,
-                            history_area_width,
-                        ),
+                        AgentEvent::Thought(t) => {
+                            if let Some(previous) = pending_agent_thought.replace(t) {
+                                append_agent_cell(
+                                    &mut history_lines,
+                                    Some(&previous),
+                                    None,
+                                    history_area_width,
+                                );
+                            }
+                        }
+                        AgentEvent::Action(a) => {
+                            let thought = pending_agent_thought.take();
+                            append_agent_cell(
+                                &mut history_lines,
+                                thought.as_deref(),
+                                Some(&a),
+                                history_area_width,
+                            );
+                        }
+                        AgentEvent::Observation(o) => {
+                            if let Some(thought) = pending_agent_thought.take() {
+                                append_agent_cell(
+                                    &mut history_lines,
+                                    Some(&thought),
+                                    None,
+                                    history_area_width,
+                                );
+                            }
+                            append_history_cell(
+                                &mut history_lines,
+                                "GAME OUTPUT",
+                                &o,
+                                history_area_width,
+                            );
+                        }
                         AgentEvent::Completed(s) => {
+                            if let Some(thought) = pending_agent_thought.take() {
+                                append_agent_cell(
+                                    &mut history_lines,
+                                    Some(&thought),
+                                    None,
+                                    history_area_width,
+                                );
+                            }
                             append_history_cell(
                                 &mut history_lines,
                                 "SYSTEM MESSAGE",
@@ -244,6 +287,14 @@ fn ui_loop<B: ratatui::backend::Backend>(
                             active_task = None;
                         }
                         AgentEvent::Failed(s) => {
+                            if let Some(thought) = pending_agent_thought.take() {
+                                append_agent_cell(
+                                    &mut history_lines,
+                                    Some(&thought),
+                                    None,
+                                    history_area_width,
+                                );
+                            }
                             append_history_cell(
                                 &mut history_lines,
                                 "SYSTEM MESSAGE",

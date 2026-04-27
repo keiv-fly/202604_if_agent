@@ -16,7 +16,8 @@ pub struct WorldModel {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Location {
-    pub id: String,
+    #[serde(alias = "id")]
+    pub title: String,
     pub description: String,
     pub exits: Vec<Exit>,
     pub objects: Vec<String>,
@@ -37,7 +38,7 @@ impl WorldModel {
                 .entry(first_line.to_string())
                 .and_modify(|loc| loc.description = text.to_string())
                 .or_insert(Location {
-                    id: first_line.to_string(),
+                    title: first_line.to_string(),
                     description: text.to_string(),
                     ..Default::default()
                 });
