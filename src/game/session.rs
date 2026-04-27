@@ -50,7 +50,11 @@ impl GameSession {
         let command =
             validate_game_command(command).map_err(|e| GameError::InvalidCommand(e.to_string()))?;
         let raw = self.runner.send_command(&command)?;
-        let cleaned = clean_output(&raw);
+        let mut cleaned = clean_output(&raw);
+        if cleaned.is_empty() && is_movement_command(&command) {
+            let look_raw = self.runner.send_command("look")?;
+            cleaned = clean_output(&look_raw);
+        }
         self.transcript.add_turn(command.clone(), cleaned.clone());
         Ok(Observation { text: cleaned })
     }
@@ -58,4 +62,32 @@ impl GameSession {
     pub fn transcript(&self) -> &Transcript {
         &self.transcript
     }
+}
+
+fn is_movement_command(command: &str) -> bool {
+    matches!(
+        command.trim().to_lowercase().as_str(),
+        "n"
+            | "s"
+            | "e"
+            | "w"
+            | "ne"
+            | "nw"
+            | "se"
+            | "sw"
+            | "u"
+            | "d"
+            | "in"
+            | "out"
+            | "north"
+            | "south"
+            | "east"
+            | "west"
+            | "northeast"
+            | "northwest"
+            | "southeast"
+            | "southwest"
+            | "up"
+            | "down"
+    )
 }
