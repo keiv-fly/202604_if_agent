@@ -19,7 +19,7 @@ At the end, it prints JSON with the per-run scores and averages:
 
 ```json
 {
-  "command": "explore to create the full map",
+  "command": "explore to create a full map",
   "requested_runs": 3,
   "calculation_only": false,
   "runs": [
