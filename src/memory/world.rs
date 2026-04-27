@@ -32,14 +32,14 @@ pub struct Exit {
 
 impl WorldModel {
     pub fn update_from_observation(&mut self, text: &str) {
-        if let Some(first_line) = text.lines().next().map(str::trim).filter(|s| !s.is_empty()) {
-            self.current_location = first_line.to_string();
+        if let Some((location_title, location_description)) = extract_location_snapshot(text) {
+            self.current_location = location_title.clone();
             self.locations
-                .entry(first_line.to_string())
-                .and_modify(|loc| loc.description = text.to_string())
+                .entry(location_title.clone())
+                .and_modify(|loc| loc.description = location_description.clone())
                 .or_insert(Location {
-                    title: first_line.to_string(),
-                    description: text.to_string(),
+                    title: location_title,
+                    description: location_description,
                     ..Default::default()
                 });
         }
@@ -60,4 +60,24 @@ impl WorldModel {
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(path)
     }
+}
+
+fn extract_location_snapshot(text: &str) -> Option<(String, String)> {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    for window in lines.windows(2) {
+        let candidate = window[0];
+        let detail = window[1];
+        if detail.to_lowercase().starts_with("you are") && !candidate.ends_with('!') {
+            return Some((candidate.to_string(), detail.to_string()));
+        }
+    }
+
+    lines
+        .first()
+        .map(|line| ((*line).to_string(), text.to_string()))
 }
