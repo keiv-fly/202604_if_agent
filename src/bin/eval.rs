@@ -72,12 +72,21 @@ struct WorldState {
 struct WorldLocation {
     title: Option<String>,
     description: Option<String>,
+    #[serde(default)]
+    exits: Vec<WorldStateExit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorldStateExit {
+    direction: String,
+    destination: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct FirstNode {
     title: String,
     description: String,
+    exits: HashMap<String, HashMap<String, f64>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -93,6 +102,8 @@ struct EvalRun {
     share_of_titles_found_info: String,
     share_of_titles_and_descriptions: f64,
     share_of_titles_and_descriptions_info: String,
+    share_of_exits: f64,
+    share_of_exits_info: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +115,7 @@ struct EvalOutput {
     runs: Vec<EvalRun>,
     average_share_of_titles_found: f64,
     average_share_of_titles_and_descriptions: f64,
+    average_share_of_exits: f64,
 }
 
 fn main() -> Result<()> {
@@ -135,8 +147,10 @@ fn main() -> Result<()> {
         logger.log(
             "eval_run_score",
             &format!(
-                "run=1 titles={} title_descriptions={}",
-                scores.share_of_titles_found, scores.share_of_titles_and_descriptions
+                "run=1 titles={} title_descriptions={} exits={}",
+                scores.share_of_titles_found,
+                scores.share_of_titles_and_descriptions,
+                scores.share_of_exits
             ),
         );
         runs.push(EvalRun {
@@ -151,6 +165,8 @@ fn main() -> Result<()> {
             share_of_titles_found_info: scores.share_of_titles_found_info,
             share_of_titles_and_descriptions: scores.share_of_titles_and_descriptions,
             share_of_titles_and_descriptions_info: scores.share_of_titles_and_descriptions_info,
+            share_of_exits: scores.share_of_exits,
+            share_of_exits_info: scores.share_of_exits_info,
         });
     } else {
         for run in 1..=args.runs {
@@ -165,8 +181,10 @@ fn main() -> Result<()> {
             logger.log(
                 "eval_run_score",
                 &format!(
-                    "run={run} titles={} title_descriptions={}",
-                    scores.share_of_titles_found, scores.share_of_titles_and_descriptions
+                    "run={run} titles={} title_descriptions={} exits={}",
+                    scores.share_of_titles_found,
+                    scores.share_of_titles_and_descriptions,
+                    scores.share_of_exits
                 ),
             );
             runs.push(EvalRun {
@@ -181,6 +199,8 @@ fn main() -> Result<()> {
                 share_of_titles_found_info: scores.share_of_titles_found_info,
                 share_of_titles_and_descriptions: scores.share_of_titles_and_descriptions,
                 share_of_titles_and_descriptions_info: scores.share_of_titles_and_descriptions_info,
+                share_of_exits: scores.share_of_exits,
+                share_of_exits_info: scores.share_of_exits_info,
             });
         }
     }
@@ -192,6 +212,7 @@ fn main() -> Result<()> {
         calculation_only: args.calculate_only,
         average_share_of_titles_found: average_titles(&runs),
         average_share_of_titles_and_descriptions: average_title_descriptions(&runs),
+        average_share_of_exits: average_exits(&runs),
         runs,
     };
 
@@ -673,6 +694,8 @@ struct Scores {
     share_of_titles_found_info: String,
     share_of_titles_and_descriptions: f64,
     share_of_titles_and_descriptions_info: String,
+    share_of_exits: f64,
+    share_of_exits_info: String,
 }
 
 fn score_world_state(world_state: &WorldState, first_nodes: &HashMap<String, FirstNode>) -> Scores {
@@ -686,8 +709,14 @@ fn score_world_state(world_state: &WorldState, first_nodes: &HashMap<String, Fir
         .values()
         .filter_map(|location| Some((location.title.clone()?, location.description.clone()?)))
         .collect::<Vec<_>>();
+    let world_exits = world_state_exit_items(world_state, first_nodes);
 
-    score_values(world_titles, world_title_descriptions, first_nodes)
+    score_values(
+        world_titles,
+        world_title_descriptions,
+        world_exits,
+        first_nodes,
+    )
 }
 
 fn score_world_model(world: &WorldModel, first_nodes: &HashMap<String, FirstNode>) -> Scores {
@@ -701,13 +730,20 @@ fn score_world_model(world: &WorldModel, first_nodes: &HashMap<String, FirstNode
         .values()
         .map(|location| (location.title.clone(), location.description.clone()))
         .collect::<Vec<_>>();
+    let world_exits = world_model_exit_items(world, first_nodes);
 
-    score_values(world_titles, world_title_descriptions, first_nodes)
+    score_values(
+        world_titles,
+        world_title_descriptions,
+        world_exits,
+        first_nodes,
+    )
 }
 
 fn score_values(
     world_titles: Vec<String>,
     world_title_descriptions: Vec<(String, String)>,
+    world_exits: Vec<ExitItem>,
     first_nodes: &HashMap<String, FirstNode>,
 ) -> Scores {
     let expected_titles = first_nodes
@@ -722,11 +758,15 @@ fn score_values(
     let ground_truth_title_count = expected_titles.len();
     let actual_title_description_count = world_title_descriptions.len();
     let ground_truth_title_description_count = expected_title_descriptions.len();
+    let expected_exits = first_node_exit_items(first_nodes);
+    let actual_exit_count = world_exits.len();
+    let ground_truth_exit_count = expected_exits.len();
     let world_title_nodes = disambiguate_duplicate_titles(world_titles);
     let expected_title_nodes = disambiguate_duplicate_titles(expected_titles);
     let title_score = multiset_jaccard(&world_title_nodes, &expected_title_nodes);
     let title_description_score =
         multiset_jaccard(&world_title_descriptions, &expected_title_descriptions);
+    let exit_score = multiset_jaccard(&world_exits, &expected_exits);
 
     Scores {
         share_of_titles_found: title_score.value,
@@ -736,7 +776,191 @@ fn score_values(
             actual_title_description_count,
             ground_truth_title_description_count,
         ),
+        share_of_exits: exit_score.value,
+        share_of_exits_info: exit_score.info(actual_exit_count, ground_truth_exit_count),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ExitItem {
+    source: String,
+    direction: String,
+    destination: String,
+}
+
+fn first_node_exit_items(first_nodes: &HashMap<String, FirstNode>) -> Vec<ExitItem> {
+    first_nodes
+        .iter()
+        .flat_map(|(source, node)| {
+            node.exits
+                .iter()
+                .flat_map(move |(direction, destinations)| {
+                    destinations.keys().filter_map(move |destination| {
+                        Some(ExitItem {
+                            source: source.clone(),
+                            direction: normalize_move_command(direction)?,
+                            destination: destination.clone(),
+                        })
+                    })
+                })
+        })
+        .collect()
+}
+
+fn world_state_exit_items(
+    world_state: &WorldState,
+    first_nodes: &HashMap<String, FirstNode>,
+) -> Vec<ExitItem> {
+    let node_ids = first_node_ids_by_location(first_nodes);
+    let mut exit_items = Vec::new();
+
+    for (source_key, location) in &world_state.locations {
+        let source = node_id_for_world_state_location(source_key, location, &node_ids);
+        for exit in &location.exits {
+            let Some(direction) = normalize_move_command(&exit.direction) else {
+                continue;
+            };
+            let Some(destination) = exit.destination.as_ref() else {
+                continue;
+            };
+
+            exit_items.push(ExitItem {
+                source: source.clone(),
+                direction,
+                destination: node_id_for_world_state_destination(
+                    destination,
+                    world_state,
+                    first_nodes,
+                    &node_ids,
+                ),
+            });
+        }
+    }
+
+    exit_items
+}
+
+fn world_model_exit_items(
+    world: &WorldModel,
+    first_nodes: &HashMap<String, FirstNode>,
+) -> Vec<ExitItem> {
+    let node_ids = first_node_ids_by_location(first_nodes);
+    let mut exit_items = Vec::new();
+
+    for (source_key, location) in &world.locations {
+        let source = node_id_for_world_model_location(source_key, location, &node_ids);
+        for exit in &location.exits {
+            let Some(direction) = normalize_move_command(&exit.direction) else {
+                continue;
+            };
+            let Some(destination) = exit.destination.as_ref() else {
+                continue;
+            };
+
+            exit_items.push(ExitItem {
+                source: source.clone(),
+                direction,
+                destination: node_id_for_world_model_destination(
+                    destination,
+                    world,
+                    first_nodes,
+                    &node_ids,
+                ),
+            });
+        }
+    }
+
+    exit_items
+}
+
+fn first_node_ids_by_location(
+    first_nodes: &HashMap<String, FirstNode>,
+) -> HashMap<(String, String), String> {
+    first_nodes
+        .iter()
+        .map(|(key, node)| {
+            (
+                (
+                    normalize_score_text(&node.title),
+                    normalize_score_text(&node.description),
+                ),
+                key.clone(),
+            )
+        })
+        .collect()
+}
+
+fn node_id_for_world_state_destination(
+    destination: &str,
+    world_state: &WorldState,
+    first_nodes: &HashMap<String, FirstNode>,
+    node_ids: &HashMap<(String, String), String>,
+) -> String {
+    if first_nodes.contains_key(destination) {
+        return destination.to_string();
+    }
+
+    world_state
+        .locations
+        .get(destination)
+        .map(|location| node_id_for_world_state_location(destination, location, node_ids))
+        .unwrap_or_else(|| destination.to_string())
+}
+
+fn node_id_for_world_model_destination(
+    destination: &str,
+    world: &WorldModel,
+    first_nodes: &HashMap<String, FirstNode>,
+    node_ids: &HashMap<(String, String), String>,
+) -> String {
+    if first_nodes.contains_key(destination) {
+        return destination.to_string();
+    }
+
+    world
+        .locations
+        .get(destination)
+        .map(|location| node_id_for_world_model_location(destination, location, node_ids))
+        .unwrap_or_else(|| destination.to_string())
+}
+
+fn node_id_for_world_state_location(
+    key: &str,
+    location: &WorldLocation,
+    node_ids: &HashMap<(String, String), String>,
+) -> String {
+    match (&location.title, &location.description) {
+        (Some(title), Some(description)) => node_ids
+            .get(&(
+                normalize_score_text(title),
+                normalize_score_text(description),
+            ))
+            .cloned()
+            .unwrap_or_else(|| key.to_string()),
+        _ => key.to_string(),
+    }
+}
+
+fn node_id_for_world_model_location(
+    key: &str,
+    location: &memory::world::Location,
+    node_ids: &HashMap<(String, String), String>,
+) -> String {
+    node_ids
+        .get(&(
+            normalize_score_text(&location.title),
+            normalize_score_text(&location.description),
+        ))
+        .cloned()
+        .unwrap_or_else(|| key.to_string())
+}
+
+fn normalize_score_text(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_lowercase()
 }
 
 fn disambiguate_duplicate_titles(titles: Vec<String>) -> Vec<String> {
@@ -777,6 +1001,14 @@ fn average_title_descriptions(runs: &[EvalRun]) -> f64 {
         .map(|run| run.share_of_titles_and_descriptions)
         .sum::<f64>()
         / runs.len() as f64
+}
+
+fn average_exits(runs: &[EvalRun]) -> f64 {
+    if runs.is_empty() {
+        return 0.0;
+    }
+
+    runs.iter().map(|run| run.share_of_exits).sum::<f64>() / runs.len() as f64
 }
 
 fn read_json<T>(path: &str) -> Result<T>

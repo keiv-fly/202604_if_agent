@@ -28,17 +28,22 @@ At the end, it prints JSON with the per-run scores and averages:
       "share_of_titles_found": 0.5,
       "share_of_titles_found_info": "6/12, 10, 8",
       "share_of_titles_and_descriptions": 0.0,
-      "share_of_titles_and_descriptions_info": "0/18, 10, 8"
+      "share_of_titles_and_descriptions_info": "0/18, 10, 8",
+      "share_of_exits": 0.0,
+      "share_of_exits_info": "0/28, 0, 28"
     }
   ],
   "average_share_of_titles_found": 0.5,
-  "average_share_of_titles_and_descriptions": 0.0
+  "average_share_of_titles_and_descriptions": 0.0,
+  "average_share_of_exits": 0.0
 }
 ```
 
 For `share_of_titles_found`, duplicate titles are treated as separate node occurrences. For example, two nodes named `In Forest` are scored as two distinct title entries.
 
-The `*_info` fields are formatted as `<jaccard numerator>/<jaccard denominator>, <actual discovered node count>, <ground truth node count from first_nodes.json>`.
+For `share_of_exits`, each item is one source location, one normalized direction, and one destination location from that direction. Multiple possible destinations under one direction count as separate items, so `forest_deep_valley` contributes 4 exit items and `hill_in_road` contributes 5.
+
+The `*_info` fields are formatted as `<jaccard numerator>/<jaccard denominator>, <actual discovered item count>, <ground truth item count from first_nodes.json>`.
 
 ## Run Eval
 
