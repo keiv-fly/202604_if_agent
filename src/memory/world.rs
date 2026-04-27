@@ -35,9 +35,11 @@ impl WorldModel {
         if let Some((location_title, location_description)) =
             location_snapshot_from_observation(text)
         {
-            self.current_location = location_title.clone();
+            let location_key =
+                self.location_key_for_snapshot(&location_title, &location_description);
+            self.current_location = location_key.clone();
             self.locations
-                .entry(location_title.clone())
+                .entry(location_key)
                 .and_modify(|loc| loc.description = location_description.clone())
                 .or_insert(Location {
                     title: location_title,
@@ -176,6 +178,20 @@ impl WorldModel {
         lines.join("\n")
     }
 
+    pub fn location_key_for_snapshot(&self, title: &str, description: &str) -> String {
+        let matching_keys = self
+            .locations
+            .iter()
+            .filter_map(|(key, location)| (location.title == title.trim()).then_some(key))
+            .collect::<Vec<_>>();
+
+        if matching_keys.len() == 1 && !looks_like_room_description(description) {
+            return matching_keys[0].clone();
+        }
+
+        location_key_from_snapshot(title, description)
+    }
+
     fn set_exit(&mut self, from: &str, direction: &str, destination: Option<String>) {
         let location = self
             .locations
@@ -247,30 +263,24 @@ pub fn location_snapshot_from_observation(text: &str) -> Option<(String, String)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
 
-    let mut latest_snapshot: Option<(String, String)> = None;
-    for window in lines.windows(2) {
-        let candidate = window[0];
-        let detail = window[1];
-        if detail.to_lowercase().starts_with("you are") && !candidate.ends_with('!') {
-            latest_snapshot = Some((candidate.to_string(), detail.to_string()));
-        }
+    if let Some((index, title)) = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, line)| is_location_title_line(line))
+    {
+        let description = lines
+            .iter()
+            .skip(index + 1)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Some(((*title).to_string(), description));
     }
 
-    if let Some(title_only) = lines.iter().rev().find(|line| is_location_title_line(line)) {
-        if latest_snapshot
-            .as_ref()
-            .map(|(title, _)| title != title_only)
-            .unwrap_or(true)
-        {
-            return Some(((*title_only).to_string(), String::new()));
-        }
-    }
-
-    latest_snapshot.or_else(|| {
-        lines
-            .first()
-            .map(|line| ((*line).to_string(), text.to_string()))
-    })
+    lines
+        .first()
+        .map(|line| ((*line).to_string(), text.to_string()))
 }
 
 fn is_location_title_line(line: &str) -> bool {
@@ -292,4 +302,33 @@ fn is_location_title_line(line: &str) -> bool {
             .map(|ch| ch.is_ascii_uppercase())
             .unwrap_or(false)
     })
+}
+
+pub fn location_key_from_snapshot(title: &str, description: &str) -> String {
+    let title = title.trim();
+    if description.trim().is_empty() {
+        return title.to_string();
+    }
+
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in normalized_key_material(description).as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{title}#{hash:08x}")
+}
+
+fn looks_like_room_description(description: &str) -> bool {
+    let normalized = normalized_key_material(description);
+    normalized.starts_with("you are ")
+        || normalized.starts_with("you have ")
+        || normalized.starts_with("at your feet ")
+}
+
+fn normalized_key_material(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_lowercase()
 }

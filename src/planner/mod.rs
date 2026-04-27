@@ -1,5 +1,5 @@
 use crate::memory::WorldModel;
-use crate::memory::world::location_snapshot_from_observation;
+use crate::memory::world::{location_key_from_snapshot, location_snapshot_from_observation};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -347,7 +347,9 @@ impl DfsPlanner {
         }
 
         let observed_location = location_snapshot_from_observation(raw_observation)
-            .map(|(location, _)| location)
+            .map(|(location, description)| {
+                location_key_for_snapshot(&self.visited_location_keys, &location, &description)
+            })
             .unwrap_or_default();
         if observed_location == attempt.source_location_key {
             return ClassifiedObservation {
@@ -477,6 +479,36 @@ pub fn world_observation_signature(world: &WorldModel) -> String {
     normalized_signature(&format!("{key}\n{description}"))
 }
 
+fn location_key_for_snapshot(
+    known_location_keys: &HashSet<String>,
+    title: &str,
+    description: &str,
+) -> String {
+    let matching_keys = known_location_keys
+        .iter()
+        .filter(|key| {
+            *key == title
+                || key
+                    .strip_prefix(title)
+                    .map(|suffix| suffix.starts_with('#'))
+                    .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+
+    if matching_keys.len() == 1 && !looks_like_room_description(description) {
+        return matching_keys[0].clone();
+    }
+
+    location_key_from_snapshot(title, description)
+}
+
+fn looks_like_room_description(description: &str) -> bool {
+    let normalized = normalized_signature(description);
+    normalized.starts_with("you are ")
+        || normalized.starts_with("you have ")
+        || normalized.starts_with("at your feet ")
+}
+
 fn observation_signature(text: &str) -> String {
     if let Some((location, description)) = location_snapshot_from_observation(text) {
         return normalized_signature(&format!("{location}\n{description}"));
@@ -512,9 +544,16 @@ fn explicit_blocked_reason(text: &str) -> Option<String> {
     let short_failure = normalized.len() <= 96
         && (normalized.starts_with("there is no way")
             || normalized.starts_with("you are unable to")
-            || normalized.starts_with("you can't"));
+            || normalized.starts_with("you can't")
+            || normalized.starts_with("but you aren't in anything")
+            || normalized.starts_with("the pipes are too small")
+            || normalized.starts_with("you don't fit through"));
     if short_failure {
         return Some("explicit_blocked_response".to_string());
+    }
+
+    if normalized.len() <= 160 && normalized.contains("the only exit is to") {
+        return Some("only_exit_response".to_string());
     }
 
     None
@@ -746,12 +785,17 @@ mod tests {
             &world,
         );
 
-        assert!(world.locations.contains_key("Clearing"));
+        assert!(
+            world
+                .locations
+                .values()
+                .any(|location| location.title == "Clearing")
+        );
         assert!(
             planner
                 .frontier()
                 .iter()
-                .any(|action| action.source_location_key == "Clearing")
+                .any(|action| action.source_location_key.starts_with("Clearing#"))
         );
     }
 }
