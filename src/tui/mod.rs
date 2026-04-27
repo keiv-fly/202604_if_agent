@@ -552,7 +552,7 @@ fn handle_input(
             Ok(obs) => obs.text,
             Err(e) => format!("Failed to run command: {e}"),
         };
-        world.update_from_observation(&obs);
+        world.update_from_observation_with_command(&obs, Some(cmd));
         append_history_cell(history_lines, "GAME OUTPUT", &obs, history_width);
         return Ok(false);
     }

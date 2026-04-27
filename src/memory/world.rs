@@ -2,6 +2,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -12,6 +13,10 @@ pub struct WorldModel {
     pub important_objects: Vec<String>,
     pub hypotheses: Vec<String>,
     pub task_notes: Vec<String>,
+    #[serde(skip)]
+    current_path: Vec<String>,
+    #[serde(skip)]
+    location_paths: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -31,11 +36,20 @@ pub struct Exit {
 }
 
 impl WorldModel {
-    pub fn update_from_observation(&mut self, text: &str) {
+    pub fn update_from_observation_with_command(&mut self, text: &str, command: Option<&str>) {
         if let Some((location_title, location_description)) = extract_location_snapshot(text) {
-            self.current_location = location_title.clone();
+            let next_path = next_path(&self.current_path, command);
+            let location_id = self.resolve_location_id(
+                &location_title,
+                &location_description,
+                next_path.as_deref(),
+            );
+            self.current_location = location_id.clone();
+            self.current_path = next_path
+                .map(|path| split_path(&path))
+                .unwrap_or_else(|| self.current_path.clone());
             self.locations
-                .entry(location_title.clone())
+                .entry(location_id.clone())
                 .and_modify(|loc| loc.description = location_description.clone())
                 .or_insert(Location {
                     title: location_title,
@@ -53,12 +67,134 @@ impl WorldModel {
         }
     }
 
+    fn resolve_location_id(
+        &mut self,
+        location_title: &str,
+        location_description: &str,
+        path: Option<&str>,
+    ) -> String {
+        let canonical_description = canonicalize_description(location_description);
+        let matching_ids = self
+            .locations
+            .iter()
+            .filter_map(|(id, loc)| {
+                (loc.title == location_title
+                    && canonicalize_description(&loc.description) == canonical_description)
+                    .then_some(id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        if matching_ids.is_empty() {
+            return self.make_location_id(location_title, &canonical_description, path);
+        }
+
+        if matching_ids.len() == 1 {
+            if let Some(path) = path {
+                self.location_paths
+                    .entry(matching_ids[0].clone())
+                    .or_insert_with(|| path.to_string());
+            }
+            return matching_ids[0].clone();
+        }
+
+        if let Some(path) = path {
+            if let Some(matching_path_id) = matching_ids
+                .iter()
+                .find(|id| self.location_paths.get(*id).map(String::as_str) == Some(path))
+            {
+                return matching_path_id.clone();
+            }
+        }
+
+        self.make_location_id(location_title, &canonical_description, path)
+    }
+
+    fn make_location_id(
+        &mut self,
+        location_title: &str,
+        canonical_description: &str,
+        path: Option<&str>,
+    ) -> String {
+        let base = if canonical_description.is_empty() {
+            format!("{location_title}::path:{}", path.unwrap_or("origin"))
+        } else {
+            format!(
+                "{location_title}::desc:{}",
+                short_hash(canonical_description)
+            )
+        };
+
+        let mut candidate = base;
+        let mut suffix = 2;
+        while self.locations.contains_key(&candidate) {
+            candidate = format!("{location_title}::variant:{suffix}");
+            suffix += 1;
+        }
+
+        if let Some(path) = path {
+            self.location_paths
+                .insert(candidate.clone(), path.to_string());
+        }
+
+        candidate
+    }
+
     pub fn save_to_disk(&self) -> anyhow::Result<PathBuf> {
         fs::create_dir_all("memory_store")?;
         let _stamp = Utc::now().format("%Y%m%d-%H%M%S");
         let path = PathBuf::from("memory_store/world-state.json");
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(path)
+    }
+}
+
+fn canonicalize_description(description: &str) -> String {
+    description
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn short_hash(value: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn split_path(path: &str) -> Vec<String> {
+    path.split('/')
+        .filter(|step| !step.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn next_path(current_path: &[String], command: Option<&str>) -> Option<String> {
+    let movement = command.and_then(normalize_move_command)?;
+    let mut updated = current_path.to_vec();
+    updated.push(movement.to_string());
+    Some(updated.join("/"))
+}
+
+fn normalize_move_command(command: &str) -> Option<&'static str> {
+    let mut normalized = command.trim().to_lowercase();
+    if let Some(stripped) = normalized.strip_prefix("go ") {
+        normalized = stripped.trim().to_string();
+    }
+    match normalized.as_str() {
+        "north" | "n" => Some("north"),
+        "south" | "s" => Some("south"),
+        "east" | "e" => Some("east"),
+        "west" | "w" => Some("west"),
+        "northeast" | "ne" => Some("northeast"),
+        "northwest" | "nw" => Some("northwest"),
+        "southeast" | "se" => Some("southeast"),
+        "southwest" | "sw" => Some("southwest"),
+        "up" | "u" => Some("up"),
+        "down" | "d" => Some("down"),
+        "in" | "inside" | "enter" | "enter building" | "enter cave" => Some("in"),
+        "out" | "outside" | "exit" => Some("out"),
+        _ => None,
     }
 }
 

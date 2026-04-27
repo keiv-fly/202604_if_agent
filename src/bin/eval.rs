@@ -252,7 +252,7 @@ fn run_program(command: &str, logger: &SessionLogger) -> Result<WorldModel> {
         .map_err(|e| anyhow::anyhow!("failed to run initial look command: {e}"))?;
     logger.log("game_output", &initial_observation.text);
     print_game_output(&initial_observation.text);
-    world.update_from_observation(&initial_observation.text);
+    world.update_from_observation_with_command(&initial_observation.text, None);
 
     let mut task = AgentTask::new(command.to_string());
     loop {
@@ -354,7 +354,7 @@ fn run_eval_turn(
         }
     };
 
-    world.update_from_observation(&observation);
+    world.update_from_observation_with_command(&observation, Some(&command));
     world.task_notes.extend(reply.memory_update.notes);
     logger.log("game_output", &observation);
     print_game_output(&observation);

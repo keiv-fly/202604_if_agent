@@ -128,7 +128,7 @@ fn apply_reply(
         }
     };
 
-    world.update_from_observation(&obs);
+    world.update_from_observation_with_command(&obs, Some(&command));
     world.task_notes.extend(reply.memory_update.notes);
     logger.log("game_output", &obs);
     events.push(AgentEvent::Observation(obs));
