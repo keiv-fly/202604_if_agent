@@ -17,17 +17,20 @@ mod logging;
 #[path = "../memory/mod.rs"]
 mod memory;
 
-use agent::{AgentEvent, AgentTask, run_single_turn};
+use agent::AgentTask;
 use anyhow::{Context, Result, bail};
 use config::AppConfig;
 use game::GameSession;
-use llm::LlmClient;
+use game::validation::validate_game_command;
+use llm::prompt::build_user_prompt;
+use llm::{LlmClient, LlmResponseParseError};
 use logging::SessionLogger;
 use memory::WorldModel;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::{self, Write};
 
 const DEFAULT_WORLD_STATE_PATH: &str = "memory_store/world-state.json";
 const DEFAULT_FIRST_NODES_PATH: &str = "eval_data/first_nodes.json";
@@ -64,7 +67,9 @@ struct FirstNode {
 struct EvalRun {
     run: usize,
     share_of_titles_found: f64,
+    share_of_titles_found_info: String,
     share_of_titles_and_descriptions: f64,
+    share_of_titles_and_descriptions_info: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,18 +95,22 @@ fn main() -> Result<()> {
         runs.push(EvalRun {
             run: 1,
             share_of_titles_found: scores.share_of_titles_found,
+            share_of_titles_found_info: scores.share_of_titles_found_info,
             share_of_titles_and_descriptions: scores.share_of_titles_and_descriptions,
+            share_of_titles_and_descriptions_info: scores.share_of_titles_and_descriptions_info,
         });
     } else {
         for run in 1..=args.runs {
-            eprintln!("Starting eval run {run}/{}...", args.runs);
+            println!("eval>Starting eval run {run}/{}...", args.runs);
             let world = run_program(&args.command)
                 .with_context(|| format!("failed during eval run {run}"))?;
             let scores = score_world_model(&world, &first_nodes);
             runs.push(EvalRun {
                 run,
                 share_of_titles_found: scores.share_of_titles_found,
+                share_of_titles_found_info: scores.share_of_titles_found_info,
                 share_of_titles_and_descriptions: scores.share_of_titles_and_descriptions,
+                share_of_titles_and_descriptions_info: scores.share_of_titles_and_descriptions_info,
             });
         }
     }
@@ -115,6 +124,7 @@ fn main() -> Result<()> {
         runs,
     };
 
+    io::stdout().flush()?;
     println!("{}", serde_json::to_string_pretty(&output)?);
 
     Ok(())
@@ -210,17 +220,7 @@ fn run_program(command: &str) -> Result<WorldModel> {
 
     let mut task = AgentTask::new(command.to_string());
     loop {
-        let events = run_single_turn(&mut task, &mut game, &mut world, &llm, &logger);
-        for event in &events {
-            match event {
-                AgentEvent::Action(command) => print_agent_input(command),
-                AgentEvent::Observation(text) => print_game_output(text),
-                _ => {}
-            }
-        }
-        let is_finished = events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::Completed(_) | AgentEvent::Failed(_)));
+        let is_finished = run_eval_turn(&mut task, &mut game, &mut world, &llm, &logger);
 
         if is_finished || task.turns >= task.max_turns {
             break;
@@ -230,18 +230,111 @@ fn run_program(command: &str) -> Result<WorldModel> {
     Ok(world)
 }
 
+fn run_eval_turn(
+    task: &mut AgentTask,
+    game: &mut GameSession,
+    world: &mut WorldModel,
+    llm: &LlmClient,
+    logger: &SessionLogger,
+) -> bool {
+    if task.turns >= task.max_turns {
+        println!("eval>Stopping task due to max-turn safety guard.");
+        return true;
+    }
+
+    let transcript_tail = game.transcript().render();
+    let prompt = build_user_prompt(&task.prompt, &transcript_tail, world);
+    let reply = match llm.next_action(&prompt, logger) {
+        Ok(value) => value,
+        Err(err) => {
+            let message = format!("LLM error: {err}");
+            logger.log("llm_error", &message);
+            if let Some(parse_error) = err.downcast_ref::<LlmResponseParseError>() {
+                logger.log("llm_unparsed_response", parse_error.raw_response());
+            }
+            println!("eval>{message}");
+            return true;
+        }
+    };
+
+    logger.log("agent_thought", &reply.thought);
+    if reply.task_status.complete {
+        println!("eval>{}", reply.task_status.summary);
+        return true;
+    }
+
+    if reply.action.action_type != "game_command" {
+        println!("eval>invalid action type from LLM");
+        return true;
+    }
+
+    let command = match validate_game_command(&reply.action.command) {
+        Ok(command) => command,
+        Err(err) => {
+            println!("agent>{}", reply.action.command);
+            println!("eval>invalid command from LLM: {err}");
+            return true;
+        }
+    };
+
+    if task.last_command.as_deref() == Some(command.as_str()) {
+        task.repeated_guard += 1;
+    } else {
+        task.repeated_guard = 0;
+    }
+    task.last_command = Some(command.clone());
+
+    if task.repeated_guard >= 2 {
+        println!("agent>{command}");
+        println!("eval>loop guard: same command repeated too many times");
+        return true;
+    }
+
+    print_agent_input(&command);
+    logger.log("agent_action", &command);
+
+    let observation = match game.execute(&command) {
+        Ok(observation) => observation.text,
+        Err(err) => {
+            println!("eval>game command failed: {err}");
+            return true;
+        }
+    };
+
+    world.update_from_observation(&observation);
+    world.task_notes.extend(reply.memory_update.notes);
+    logger.log("game_output", &observation);
+    print_game_output(&observation);
+    task.turns += 1;
+
+    false
+}
+
 fn print_game_output(text: &str) {
-    eprintln!("game>{text}");
+    print_prefixed_lines("game>", text);
 }
 
 fn print_agent_input(text: &str) {
-    eprintln!("agent>{text}");
+    print_prefixed_lines("agent>", text);
+}
+
+fn print_prefixed_lines(prefix: &str, text: &str) {
+    if text.is_empty() {
+        println!("{prefix}");
+        return;
+    }
+
+    for line in text.lines() {
+        println!("{prefix}{line}");
+    }
 }
 
 #[derive(Debug)]
 struct Scores {
     share_of_titles_found: f64,
+    share_of_titles_found_info: String,
     share_of_titles_and_descriptions: f64,
+    share_of_titles_and_descriptions_info: String,
 }
 
 fn score_world_state(world_state: &WorldState, first_nodes: &HashMap<String, FirstNode>) -> Scores {
@@ -287,14 +380,43 @@ fn score_values(
         .values()
         .map(|node| (node.title.clone(), node.description.clone()))
         .collect::<Vec<_>>();
+    let actual_title_count = world_titles.len();
+    let ground_truth_title_count = expected_titles.len();
+    let actual_title_description_count = world_title_descriptions.len();
+    let ground_truth_title_description_count = expected_title_descriptions.len();
+    let world_title_nodes = disambiguate_duplicate_titles(world_titles);
+    let expected_title_nodes = disambiguate_duplicate_titles(expected_titles);
+    let title_score = multiset_jaccard(&world_title_nodes, &expected_title_nodes);
+    let title_description_score =
+        multiset_jaccard(&world_title_descriptions, &expected_title_descriptions);
 
     Scores {
-        share_of_titles_found: multiset_jaccard(&world_titles, &expected_titles),
-        share_of_titles_and_descriptions: multiset_jaccard(
-            &world_title_descriptions,
-            &expected_title_descriptions,
+        share_of_titles_found: title_score.value,
+        share_of_titles_found_info: title_score.info(actual_title_count, ground_truth_title_count),
+        share_of_titles_and_descriptions: title_description_score.value,
+        share_of_titles_and_descriptions_info: title_description_score.info(
+            actual_title_description_count,
+            ground_truth_title_description_count,
         ),
     }
+}
+
+fn disambiguate_duplicate_titles(titles: Vec<String>) -> Vec<String> {
+    let title_counts = counts(&titles);
+    let mut seen = HashMap::<String, usize>::new();
+
+    titles
+        .into_iter()
+        .map(|title| {
+            if title_counts.get(&title).copied().unwrap_or(0) <= 1 {
+                return title;
+            }
+
+            let occurrence = seen.entry(title.clone()).or_insert(0);
+            *occurrence += 1;
+            format!("{title}#{}", *occurrence)
+        })
+        .collect()
 }
 
 fn average_titles(runs: &[EvalRun]) -> f64 {
@@ -327,7 +449,22 @@ where
     serde_json::from_str(&contents).with_context(|| format!("failed to parse {path}"))
 }
 
-fn multiset_jaccard<T>(left: &[T], right: &[T]) -> f64
+struct JaccardScore {
+    value: f64,
+    numerator: usize,
+    denominator: usize,
+}
+
+impl JaccardScore {
+    fn info(&self, actual_count: usize, ground_truth_count: usize) -> String {
+        format!(
+            "{}/{}, {}, {}",
+            self.numerator, self.denominator, actual_count, ground_truth_count
+        )
+    }
+}
+
+fn multiset_jaccard<T>(left: &[T], right: &[T]) -> JaccardScore
 where
     T: Eq + std::hash::Hash + Clone,
 {
@@ -349,10 +486,16 @@ where
         }
     }
 
-    if union == 0 {
+    let value = if union == 0 {
         1.0
     } else {
         intersection as f64 / union as f64
+    };
+
+    JaccardScore {
+        value,
+        numerator: intersection,
+        denominator: union,
     }
 }
 
