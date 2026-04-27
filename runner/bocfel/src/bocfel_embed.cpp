@@ -259,6 +259,25 @@ int bocfel_run_script(
     return copy_output(handle, output_text, output_buffer, output_buffer_len);
 }
 
+int bocfel_run_interactive(const char* story_path) {
+    if (story_path == nullptr || story_path[0] == '\0') {
+        return -1;
+    }
+
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+
+    std::string program = "bocfel";
+    std::string path = story_path;
+    char* argv[] = {
+        program.data(),
+        path.data(),
+        nullptr,
+    };
+
+    return bocfel_cli_main(2, argv);
+}
+
 const char* bocfel_last_error(BocfelHandle* handle) {
     if (handle == nullptr) {
         return "Bocfel handle is null";

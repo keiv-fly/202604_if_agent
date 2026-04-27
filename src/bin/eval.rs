@@ -83,6 +83,10 @@ struct EvalOutput {
 }
 
 fn main() -> Result<()> {
+    if runner::run_persistent_child_from_args()? {
+        return Ok(());
+    }
+
     dotenvy::dotenv().ok();
 
     let args = Args::parse()?;

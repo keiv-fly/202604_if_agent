@@ -51,7 +51,7 @@ impl GameSession {
             validate_game_command(command).map_err(|e| GameError::InvalidCommand(e.to_string()))?;
         let raw = self.runner.send_command(&command)?;
         let mut cleaned = clean_output(&raw);
-        if cleaned.is_empty() && is_movement_command(&command) {
+        if should_describe_after_move(&cleaned, &command) {
             let look_raw = self.runner.send_command("look")?;
             cleaned = clean_output(&look_raw);
         }
@@ -89,4 +89,24 @@ fn is_movement_command(command: &str) -> bool {
             | "up"
             | "down"
     )
+}
+
+fn should_describe_after_move(observation: &str, command: &str) -> bool {
+    if !is_movement_command(command) {
+        return false;
+    }
+    if observation.trim().is_empty() {
+        return true;
+    }
+
+    let mut non_empty_lines = observation.lines().filter(|line| !line.trim().is_empty());
+    let Some(line) = non_empty_lines.next() else {
+        return true;
+    };
+    if non_empty_lines.next().is_some() {
+        return false;
+    }
+
+    let line = line.trim();
+    !line.ends_with('.') && !line.ends_with('!') && !line.ends_with('?')
 }

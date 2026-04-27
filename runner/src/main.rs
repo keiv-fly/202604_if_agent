@@ -4,6 +4,10 @@ use anyhow::{Context, Result};
 use runner::Runner;
 
 fn main() -> Result<()> {
+    if runner::run_persistent_child_from_args()? {
+        return Ok(());
+    }
+
     let story_path = story_path().context("could not find games/advent.z5")?;
     let story_path = story_path
         .to_str()

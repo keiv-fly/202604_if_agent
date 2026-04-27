@@ -24,6 +24,8 @@ int bocfel_run_script(
     unsigned int output_buffer_len
 );
 
+int bocfel_run_interactive(const char* story_path);
+
 const char* bocfel_last_error(BocfelHandle* handle);
 
 #ifdef __cplusplus
