@@ -34,7 +34,7 @@ impl AppConfig {
         let api_key = env::var("OPENROUTER_API_KEY").unwrap_or_default();
         let base_url = env::var("OPENROUTER_BASE_URL")
             .unwrap_or_else(|_| "https://openrouter.ai/api/v1/chat/completions".to_string());
-        let model = env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-5.4".to_string());
+        let model = env::var("OPENROUTER_MODEL").unwrap_or_else(|_| "minimax/minimax-m2.7".to_string());
         let temperature = env::var("OPENROUTER_TEMPERATURE")
             .ok()
             .and_then(|v| v.parse().ok())
