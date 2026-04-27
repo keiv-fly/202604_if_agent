@@ -238,6 +238,8 @@ fn run_eval_turn(
     llm: &LlmClient,
     logger: &SessionLogger,
 ) -> bool {
+    let movement_only_mode = task.prompt.to_lowercase().contains("only use the actions to move");
+
     if task.turns >= task.max_turns {
         println!("eval>Stopping task due to max-turn safety guard.");
         return true;
@@ -269,7 +271,7 @@ fn run_eval_turn(
         return true;
     }
 
-    let command = match validate_game_command(&reply.action.command) {
+    let mut command = match validate_game_command(&reply.action.command) {
         Ok(command) => command,
         Err(err) => {
             println!("agent>{}", reply.action.command);
@@ -277,6 +279,15 @@ fn run_eval_turn(
             return true;
         }
     };
+    if movement_only_mode {
+        let Some(normalized) = normalize_move_command(&command) else {
+            println!("agent>{command}");
+            println!("eval>ignored non-movement command in movement-only mode");
+            task.turns += 1;
+            return false;
+        };
+        command = normalized;
+    }
 
     if task.last_command.as_deref() == Some(command.as_str()) {
         task.repeated_guard += 1;
@@ -309,6 +320,28 @@ fn run_eval_turn(
     task.turns += 1;
 
     false
+}
+
+fn normalize_move_command(command: &str) -> Option<String> {
+    let mut normalized = command.trim().to_lowercase();
+    if let Some(stripped) = normalized.strip_prefix("go ") {
+        normalized = stripped.trim().to_string();
+    }
+    match normalized.as_str() {
+        "north" | "n" => Some("north".to_string()),
+        "south" | "s" => Some("south".to_string()),
+        "east" | "e" => Some("east".to_string()),
+        "west" | "w" => Some("west".to_string()),
+        "northeast" | "ne" => Some("northeast".to_string()),
+        "northwest" | "nw" => Some("northwest".to_string()),
+        "southeast" | "se" => Some("southeast".to_string()),
+        "southwest" | "sw" => Some("southwest".to_string()),
+        "up" | "u" => Some("up".to_string()),
+        "down" | "d" => Some("down".to_string()),
+        "in" | "inside" | "enter" | "enter building" | "enter cave" => Some("in".to_string()),
+        "out" | "outside" | "exit" => Some("out".to_string()),
+        _ => None,
+    }
 }
 
 fn print_game_output(text: &str) {
