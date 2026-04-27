@@ -1,7 +1,7 @@
 {
   "end_of_road": {
     "title": "At End Of Road",
-    "description": "You are standing at the end of a road before a small brick building. Around",
+    "description": "You are standing at the end of a road before a small brick building. Around you is a forest. A small stream flows out of the building and down a gully.",
     "transitions": {
       "n": {
         "forest_near_road": 1.0
@@ -59,7 +59,7 @@
   },
   "hill_in_road": {
     "title": "At Hill In Road",
-    "description": "You have walked up a hill, still in the forest. The road slopes back down",
+    "description": "You have walked up a hill, still in the forest. The road slopes back down the other side of the hill. There is a building in the distance.",
     "transitions": {
       "e": {
         "end_of_road": 1.0
@@ -81,7 +81,7 @@
   },
   "valley": {
     "title": "In A Valley",
-    "description": "You are in a valley in the forest beside a stream tumbling along a rocky",
+    "description": "You are in a valley in the forest beside a stream tumbling along a rocky bed.",
     "transitions": {
       "e": {
         "forest_near_road": 1.0
@@ -126,7 +126,7 @@
   },
   "slit_in_streambed": {
     "title": "At Slit In Streambed",
-    "description": "At your feet all the water of the stream splashes into a 2-inch slit in the",
+    "description": "At your feet all the water of the stream splashes into a 2-inch slit in the rock. Downstream the streambed is bare rock.",
     "transitions": {
       "s": {
         "outside_grate": 1.0
@@ -139,7 +139,7 @@
   },
   "outside_grate": {
     "title": "Outside Grate",
-    "description": "You are in a 20-foot depression floored with bare dirt. Set into the dirt",
+    "description": "You are in a 20-foot depression floored with bare dirt. Set into the dirt is a strong steel grate mounted in concrete. A dry streambed leads into the depression.",
     "transitions": {
       "n": {
         "valley": 1.0

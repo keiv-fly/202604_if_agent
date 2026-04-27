@@ -458,7 +458,25 @@ fn run_dfs_strategy(
                     world.current_location = attempt.source_location_key.clone();
                     world.apply_command_result(&previous_location, &command, true);
                 } else if !observation.is_empty() {
-                    world.update_from_observation(&observation);
+                    if classified.classification == ObservationClassification::MovedToNewLocation {
+                        let canonical_observation = match game.execute("look") {
+                            Ok(look_observation) => {
+                                logger.log("game_output", &look_observation.text);
+                                print_game_output(&look_observation.text);
+                                look_observation.text
+                            }
+                            Err(err) => {
+                                print_eval_message(
+                                    logger,
+                                    &format!("look after newly discovered location failed: {err}"),
+                                );
+                                observation.clone()
+                            }
+                        };
+                        world.update_from_observation(&canonical_observation);
+                    } else {
+                        world.update_from_observation(&observation);
+                    }
                     world.apply_command_result(&previous_location, &command, false);
                 }
                 logger.log("game_output", &observation);

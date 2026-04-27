@@ -40,7 +40,11 @@ impl WorldModel {
             self.current_location = location_key.clone();
             self.locations
                 .entry(location_key)
-                .and_modify(|loc| loc.description = location_description.clone())
+                .and_modify(|loc| {
+                    if should_update_location_description(&loc.description, &location_description) {
+                        loc.description = location_description.clone();
+                    }
+                })
                 .or_insert(Location {
                     title: location_title,
                     description: location_description,
@@ -273,8 +277,9 @@ pub fn location_snapshot_from_observation(text: &str) -> Option<(String, String)
             .iter()
             .skip(index + 1)
             .copied()
-            .collect::<Vec<_>>()
-            .join(" ");
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .to_string();
         return Some(((*title).to_string(), description));
     }
 
@@ -325,10 +330,66 @@ fn looks_like_room_description(description: &str) -> bool {
         || normalized.starts_with("at your feet ")
 }
 
+fn should_update_location_description(existing: &str, next: &str) -> bool {
+    let next = next.trim();
+    if next.is_empty() {
+        return false;
+    }
+    if existing.trim().is_empty() {
+        return true;
+    }
+    looks_like_room_description(next)
+}
+
 fn normalized_key_material(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .trim()
         .to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_uses_first_non_empty_line_after_title() {
+        let observation = "Inside Building\n\
+            You are inside a building, a well house for a large spring.\n\n\
+            There are some keys on the ground here.\n\n\
+            There is tasty food here.";
+
+        let (title, description) =
+            location_snapshot_from_observation(observation).expect("location snapshot");
+
+        assert_eq!(title, "Inside Building");
+        assert_eq!(
+            description,
+            "You are inside a building, a well house for a large spring."
+        );
+    }
+
+    #[test]
+    fn object_listing_does_not_replace_existing_description() {
+        let mut world = WorldModel::default();
+        world.update_from_observation(
+            "Inside Building\nYou are inside a building, a well house for a large spring.",
+        );
+        let key = world.current_location.clone();
+
+        world.update_from_observation(
+            "Inside Building\n\nThere are some keys on the ground here.\n\nThere is tasty food here.",
+        );
+
+        assert_eq!(world.current_location, key);
+        assert_eq!(
+            world
+                .locations
+                .get(&key)
+                .expect("location should remain known")
+                .description,
+            "You are inside a building, a well house for a large spring."
+        );
+    }
 }
