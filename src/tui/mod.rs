@@ -1,4 +1,4 @@
-use crate::agent::{run_single_turn, AgentEvent, AgentTask};
+use crate::agent::{AgentEvent, AgentTask, run_single_turn};
 use crate::config::AppConfig;
 use crate::game::{GameSession, Transcript};
 use crate::llm::LlmClient;
@@ -10,14 +10,14 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
-use ratatui::Terminal;
 use std::io;
 use std::time::{Duration, Instant};
 

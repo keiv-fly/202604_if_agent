@@ -1,8 +1,8 @@
 use crate::config::app::LlmConfig;
 use crate::llm::prompt::SYSTEM_PROMPT;
-use crate::llm::schema::{agent_reply_response_format, AgentReply};
+use crate::llm::schema::{AgentReply, agent_reply_response_format};
 use crate::logging::SessionLogger;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use reqwest::blocking::Client;
 use serde_json::json;
 use std::error::Error;

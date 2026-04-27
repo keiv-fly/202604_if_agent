@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 pub fn validate_game_command(command: &str) -> Result<String> {
     let trimmed = command.trim();
