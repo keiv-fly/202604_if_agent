@@ -35,7 +35,8 @@ use std::io::{self, Write};
 const DEFAULT_WORLD_STATE_PATH: &str = "memory_store/world-state.json";
 const DEFAULT_FIRST_NODES_PATH: &str = "eval_data/first_nodes.json";
 const DEFAULT_RUNS: usize = 3;
-const DEFAULT_COMMAND: &str = "explore to create the full map";
+const DEFAULT_COMMAND: &str =
+    "Explore to create a full map. Only use the actions to move. Do not do any other actions that are not moves.";
 
 #[derive(Debug)]
 struct Args {

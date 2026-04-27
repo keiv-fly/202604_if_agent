@@ -5,7 +5,7 @@ The `eval` binary runs the agent against the game and scores the discovered worl
 By default it runs the agent three times with this command:
 
 ```text
-explore to create the full map
+Explore to create a full map. Only use the actions to move. Do not do any other actions that are not moves.
 ```
 
 Each run prints a live transcript:
@@ -19,7 +19,7 @@ At the end, it prints JSON with the per-run scores and averages:
 
 ```json
 {
-  "command": "explore to create a full map. Only use the actions to move. Do not do any other actions that are not moves.",
+  "command": "Explore to create a full map. Only use the actions to move. Do not do any other actions that are not moves.",
   "requested_runs": 3,
   "calculation_only": false,
   "runs": [
@@ -97,7 +97,7 @@ Options:
       --no-run                Alias for --calculate-only.
       --world-state <PATH>    World-state path for --calculate-only. Default: memory_store/world-state.json.
       --first-nodes <PATH>    Expected first-nodes path. Default: eval_data/first_nodes.json.
-      --command <TEXT>        Agent command/prompt to run. Default: "explore to create the full map".
+      --command <TEXT>        Agent command/prompt to run. Default: "Explore to create a full map. Only use the actions to move. Do not do any other actions that are not moves.".
       --prompt <TEXT>         Alias for --command.
   -h, --help                  Show help.
 ```
