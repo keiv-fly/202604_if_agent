@@ -32,7 +32,9 @@ pub struct Exit {
 
 impl WorldModel {
     pub fn update_from_observation(&mut self, text: &str) {
-        if let Some((location_title, location_description)) = extract_location_snapshot(text) {
+        if let Some((location_title, location_description)) =
+            location_snapshot_from_observation(text)
+        {
             self.current_location = location_title.clone();
             self.locations
                 .entry(location_title.clone())
@@ -61,7 +63,12 @@ impl WorldModel {
         Ok(path)
     }
 
-    pub fn apply_command_result(&mut self, previous_location: &str, command: &str, command_failed: bool) {
+    pub fn apply_command_result(
+        &mut self,
+        previous_location: &str,
+        command: &str,
+        command_failed: bool,
+    ) {
         let Some(direction) = normalize_direction(command) else {
             return;
         };
@@ -81,7 +88,13 @@ impl WorldModel {
         }
     }
 
-    pub fn apply_llm_memory(&mut self, location_hint: &str, new_exits: &[String], new_objects: &[String], notes: &[String]) {
+    pub fn apply_llm_memory(
+        &mut self,
+        location_hint: &str,
+        new_exits: &[String],
+        new_objects: &[String],
+        notes: &[String],
+    ) {
         let target_location = if !location_hint.trim().is_empty() {
             location_hint.trim()
         } else {
@@ -98,11 +111,16 @@ impl WorldModel {
                 });
 
             for exit in new_exits {
-                let direction = normalize_direction(exit).unwrap_or_else(|| exit.trim().to_lowercase());
+                let direction =
+                    normalize_direction(exit).unwrap_or_else(|| exit.trim().to_lowercase());
                 if direction.is_empty() {
                     continue;
                 }
-                if !location.exits.iter().any(|known| known.direction == direction) {
+                if !location
+                    .exits
+                    .iter()
+                    .any(|known| known.direction == direction)
+                {
                     location.exits.push(Exit {
                         direction,
                         destination: None,
@@ -146,7 +164,10 @@ impl WorldModel {
             if unexplored.is_empty() {
                 continue;
             }
-            lines.push(format!("- {title}: unexplored exits [{}]", unexplored.join(", ")));
+            lines.push(format!(
+                "- {title}: unexplored exits [{}]",
+                unexplored.join(", ")
+            ));
         }
 
         if lines.len() == 1 {
@@ -219,7 +240,7 @@ fn reverse_direction(direction: &str) -> Option<&'static str> {
     }
 }
 
-fn extract_location_snapshot(text: &str) -> Option<(String, String)> {
+pub fn location_snapshot_from_observation(text: &str) -> Option<(String, String)> {
     let lines = text
         .lines()
         .map(str::trim)

@@ -27,7 +27,7 @@ impl AgentTask {
     pub fn new(prompt: String) -> Self {
         Self {
             prompt,
-            max_turns: 30,
+            max_turns: 500,
             turns: 0,
             repeated_guard: 0,
             last_command: None,

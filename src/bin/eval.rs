@@ -30,7 +30,8 @@ use llm::{LlmClient, LlmResponseParseError};
 use logging::SessionLogger;
 use memory::WorldModel;
 use planner::{
-    DfsPlanner, ObservationUpdate, PlannerDecisionKind, location_key, normalize_move_command,
+    DfsPlanner, ObservationClassification, ObservationUpdate, PlannerDecisionKind, location_key,
+    normalize_move_command,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -425,6 +426,8 @@ fn run_dfs_strategy(
                 );
 
                 let previous_location = location_key(&world);
+                let attempt =
+                    planner.pending_move_attempt(&previous_location, &command, action_id, &world);
                 let command_result = game.execute(&command);
                 let command_failed = command_result.is_err();
                 let observation = match command_result {
@@ -434,27 +437,42 @@ fn run_dfs_strategy(
                         String::new()
                     }
                 };
+                let classified =
+                    planner.classify_observation(&attempt, &observation, command_failed);
+                logger.log(
+                    "planner_observation_classification",
+                    &format!(
+                        "source={} command={} frontier={} previous_observation_signature={} new_observation_signature={} classification={:?} blocked_reason={} current_location_unchanged={}",
+                        attempt.source_location_key,
+                        attempt.command,
+                        attempt.frontier_id.as_deref().unwrap_or(""),
+                        attempt.previous_observation_signature,
+                        classified.new_observation_signature.as_deref().unwrap_or(""),
+                        classified.classification,
+                        classified.blocked_reason.as_deref().unwrap_or(""),
+                        classified.current_location_unchanged,
+                    ),
+                );
 
-                if !observation.is_empty() {
+                if classified.classification == ObservationClassification::CommandFailedOrBlocked {
+                    world.current_location = attempt.source_location_key.clone();
+                    world.apply_command_result(&previous_location, &command, true);
+                } else if !observation.is_empty() {
                     world.update_from_observation(&observation);
+                    world.apply_command_result(&previous_location, &command, false);
                 }
-                world.apply_command_result(&previous_location, &command, command_failed);
                 logger.log("game_output", &observation);
                 print_game_output(&observation);
 
-                let classification = planner.apply_observation(
+                planner.apply_observation(
                     ObservationUpdate {
-                        previous_location,
+                        attempt,
                         current_location: location_key(&world),
-                        command,
-                        command_failed,
-                        action_id,
+                        classification: classified.classification,
+                        blocked_reason: classified.blocked_reason,
+                        raw_output_hash: classified.raw_output_hash,
                     },
                     &world,
-                );
-                logger.log(
-                    "planner_observation_classification",
-                    &format!("{classification:?}"),
                 );
             }
             PlannerDecisionKind::Complete => {
