@@ -69,15 +69,49 @@ fn extract_location_snapshot(text: &str) -> Option<(String, String)> {
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
 
+    let mut latest_snapshot: Option<(String, String)> = None;
     for window in lines.windows(2) {
         let candidate = window[0];
         let detail = window[1];
         if detail.to_lowercase().starts_with("you are") && !candidate.ends_with('!') {
-            return Some((candidate.to_string(), detail.to_string()));
+            latest_snapshot = Some((candidate.to_string(), detail.to_string()));
         }
     }
 
-    lines
-        .first()
-        .map(|line| ((*line).to_string(), text.to_string()))
+    if let Some(title_only) = lines.iter().rev().find(|line| is_location_title_line(line)) {
+        if latest_snapshot
+            .as_ref()
+            .map(|(title, _)| title != title_only)
+            .unwrap_or(true)
+        {
+            return Some(((*title_only).to_string(), String::new()));
+        }
+    }
+
+    latest_snapshot.or_else(|| {
+        lines
+            .first()
+            .map(|line| ((*line).to_string(), text.to_string()))
+    })
+}
+
+fn is_location_title_line(line: &str) -> bool {
+    if line.is_empty() || line.ends_with('!') {
+        return false;
+    }
+    if line.contains('>') {
+        return false;
+    }
+
+    let words = line.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() || words.len() > 8 {
+        return false;
+    }
+
+    words.iter().all(|word| {
+        word.chars()
+            .next()
+            .map(|ch| ch.is_ascii_uppercase())
+            .unwrap_or(false)
+    })
 }
