@@ -158,6 +158,7 @@ impl DfsPlanner {
     }
 
     pub fn observe_world(&mut self, world: &WorldModel) {
+        self.remap_location_references(world);
         let current = location_key(world);
         if current.is_empty() {
             return;
@@ -341,6 +342,7 @@ impl DfsPlanner {
 
     pub fn classify_observation(
         &self,
+        world: &WorldModel,
         attempt: &PendingMoveAttempt,
         raw_observation: &str,
         command_failed: bool,
@@ -380,11 +382,20 @@ impl DfsPlanner {
         }
 
         let observed_location = location_snapshot_from_observation(raw_observation)
-            .map(|(location, description)| {
-                location_key_for_snapshot(&self.visited_location_keys, &location, &description)
+            .and_then(|(location, description)| {
+                world
+                    .match_location_snapshot_with_context(
+                        &location,
+                        &description,
+                        &attempt.source_location_key,
+                        &attempt.command,
+                    )
+                    .map(|location_match| location_match.key)
+                    .or_else(|| Some(location_key_from_snapshot(&location, &description)))
             })
             .unwrap_or_default();
-        if observed_location == attempt.source_location_key {
+        let source_location = world.canonical_location_key(&attempt.source_location_key);
+        if observed_location == source_location {
             return ClassifiedObservation {
                 classification: ObservationClassification::MovedToSameLocation,
                 blocked_reason: None,
@@ -394,7 +405,10 @@ impl DfsPlanner {
             };
         }
 
-        let classification = if self.visited_location_keys.contains(&observed_location) {
+        let canonical_observed = world.canonical_location_key(&observed_location);
+        let classification = if self.visited_location_keys.contains(&canonical_observed)
+            || world.locations.contains_key(&canonical_observed)
+        {
             ObservationClassification::MovedToKnownLocation
         } else {
             ObservationClassification::MovedToNewLocation
@@ -470,6 +484,58 @@ impl DfsPlanner {
                 failure_reason: None,
             });
         }
+    }
+
+    fn remap_location_references(&mut self, world: &WorldModel) {
+        self.visited_location_keys = self
+            .visited_location_keys
+            .iter()
+            .map(|key| world.canonical_location_key(key))
+            .filter(|key| !key.is_empty())
+            .collect();
+
+        let mut seen_stack = HashSet::new();
+        self.dfs_stack = self
+            .dfs_stack
+            .iter()
+            .map(|key| world.canonical_location_key(key))
+            .filter(|key| !key.is_empty() && seen_stack.insert(key.clone()))
+            .collect();
+
+        for action in &mut self.frontier {
+            action.source_location_key = world.canonical_location_key(&action.source_location_key);
+            if let Some(destination) = &mut action.expected_destination {
+                *destination = world.canonical_location_key(destination);
+            }
+        }
+
+        let mut seen_frontiers = HashSet::new();
+        self.frontier.retain(|action| {
+            let key = (action.source_location_key.clone(), action.command.clone());
+            if action.status == FrontierStatus::Pending {
+                seen_frontiers.insert(key)
+            } else {
+                true
+            }
+        });
+
+        self.attempted = self
+            .attempted
+            .iter()
+            .map(|(location, command)| (world.canonical_location_key(location), command.clone()))
+            .collect();
+
+        let mut blocked_edges = HashMap::<String, HashMap<String, BlockedEdge>>::new();
+        for (location, commands) in &self.blocked_edges {
+            let canonical_location = world.canonical_location_key(location);
+            let target = blocked_edges.entry(canonical_location.clone()).or_default();
+            for (command, edge) in commands {
+                let mut edge = edge.clone();
+                edge.source_location_key = canonical_location.clone();
+                target.insert(command.clone(), edge);
+            }
+        }
+        self.blocked_edges = blocked_edges;
     }
 
     fn recovery_plan(
@@ -572,36 +638,6 @@ pub fn world_observation_signature(world: &WorldModel) -> String {
         .map(|location| location.description.as_str())
         .unwrap_or_default();
     normalized_signature(&format!("{key}\n{description}"))
-}
-
-fn location_key_for_snapshot(
-    known_location_keys: &HashSet<String>,
-    title: &str,
-    description: &str,
-) -> String {
-    let base_key = location_key_from_snapshot(title, description);
-    let title_prefix = format!("{}. ", title.trim());
-    let matching_keys = known_location_keys
-        .iter()
-        .filter(|key| {
-            *key == &base_key
-                || key.strip_prefix(&format!("{base_key}#")).is_some()
-                || key.starts_with(&title_prefix)
-        })
-        .collect::<Vec<_>>();
-
-    if matching_keys.len() == 1 {
-        return matching_keys[0].clone();
-    }
-
-    base_key
-}
-
-fn looks_like_room_description(description: &str) -> bool {
-    let normalized = normalized_signature(description);
-    normalized.starts_with("you are ")
-        || normalized.starts_with("you have ")
-        || normalized.starts_with("at your feet ")
 }
 
 fn observation_signature(text: &str) -> String {
@@ -958,12 +994,75 @@ mod tests {
     }
 
     #[test]
+    fn observe_world_remaps_alias_frontiers_to_canonical_locations() {
+        let mut world = WorldModel::default();
+        world.update_from_observation("In Forest\nYou are in open forest, with a deep valley.");
+        let canonical = world.current_location.clone();
+        let mut planner = DfsPlanner::new(&world);
+        planner.frontier.clear();
+        planner.frontier.push(FrontierAction {
+            id: "frontier-stale".to_string(),
+            source_location_key: "In Forest".to_string(),
+            command: "west".to_string(),
+            expected_destination: Some("In Forest".to_string()),
+            status: FrontierStatus::Pending,
+            priority: 1,
+            reason: "stale alias frontier".to_string(),
+            discovery_turn: 0,
+            last_attempted_turn: None,
+            failure_reason: None,
+        });
+        planner
+            .attempted
+            .insert(("In Forest".to_string(), "north".to_string()));
+        planner.blocked_edges.insert(
+            "In Forest".to_string(),
+            HashMap::from([(
+                "south".to_string(),
+                BlockedEdge {
+                    source_location_key: "In Forest".to_string(),
+                    command: "south".to_string(),
+                    turn: 1,
+                    reason: "test".to_string(),
+                    raw_output_hash: "hash".to_string(),
+                },
+            )]),
+        );
+
+        planner.observe_world(&world);
+
+        let frontier = planner
+            .frontier()
+            .iter()
+            .find(|action| action.id == "frontier-stale")
+            .expect("frontier should remain");
+        assert_eq!(frontier.source_location_key, canonical);
+        assert_eq!(
+            frontier.expected_destination.as_deref(),
+            Some(canonical.as_str())
+        );
+        assert!(
+            planner
+                .attempted
+                .contains(&(canonical.clone(), "north".to_string()))
+        );
+        assert!(planner.blocked_edges().contains_key(&canonical));
+        assert!(
+            !planner
+                .frontier()
+                .iter()
+                .any(|action| action.source_location_key == "In Forest")
+        );
+    }
+
+    #[test]
     fn direct_failure_marks_frontier_failed_without_destination() {
         let world = world_at("Forest", "You are standing in a forest.");
         let mut planner = DfsPlanner::new(&world);
         let attempt = selected_attempt(&mut planner, &world);
 
-        let classified = planner.classify_observation(&attempt, "You can't go that way.", false);
+        let classified =
+            planner.classify_observation(&world, &attempt, "You can't go that way.", false);
         let classification = planner.apply_observation(
             ObservationUpdate {
                 attempt: attempt.clone(),
@@ -1004,7 +1103,8 @@ mod tests {
         let attempt = selected_attempt(&mut planner, &world);
         let initial_frontier_count = planner.frontier().len();
 
-        let classified = planner.classify_observation(&attempt, "You can't go that way.", false);
+        let classified =
+            planner.classify_observation(&world, &attempt, "You can't go that way.", false);
         if classified.classification != ObservationClassification::CommandFailedOrBlocked {
             world.update_from_observation("You can't go that way.");
         }
@@ -1031,7 +1131,7 @@ mod tests {
         let attempt = selected_attempt(&mut planner, &world);
         let response = "Forest\nYou are standing in a forest.";
 
-        let classified = planner.classify_observation(&attempt, response, false);
+        let classified = planner.classify_observation(&world, &attempt, response, false);
 
         assert_eq!(
             classified.classification,
@@ -1048,7 +1148,7 @@ mod tests {
         let attempt = selected_attempt(&mut planner, &world);
         let response = "Forest\nYou are standing in a forest.";
 
-        let classified = planner.classify_observation(&attempt, response, false);
+        let classified = planner.classify_observation(&world, &attempt, response, false);
         world.update_from_observation(response);
         world.apply_command_result_with_destination(
             &attempt.source_location_key,
@@ -1098,7 +1198,7 @@ mod tests {
         let world = world_at("Forest", "You are standing in a forest.");
         let mut planner = DfsPlanner::new(&world);
         let attempt = selected_attempt(&mut planner, &world);
-        let classified = planner.classify_observation(&attempt, "Nothing happens.", false);
+        let classified = planner.classify_observation(&world, &attempt, "Nothing happens.", false);
         planner.apply_observation(
             ObservationUpdate {
                 attempt: attempt.clone(),
@@ -1130,7 +1230,7 @@ mod tests {
         let attempt = selected_attempt(&mut planner, &world);
         let response = "Clearing\nYou are in a sunny clearing.";
 
-        let classified = planner.classify_observation(&attempt, response, false);
+        let classified = planner.classify_observation(&world, &attempt, response, false);
         assert_eq!(
             classified.classification,
             ObservationClassification::MovedToNewLocation
@@ -1157,7 +1257,7 @@ mod tests {
             planner
                 .frontier()
                 .iter()
-                .any(|action| { action.source_location_key.starts_with("Clearing") })
+                .any(|action| { action.source_location_key == location_key(&world) })
         );
     }
 }

@@ -8,6 +8,10 @@ use std::path::PathBuf;
 pub struct WorldModel {
     pub current_location: String,
     pub locations: HashMap<String, Location>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub location_aliases: HashMap<String, String>,
+    #[serde(default)]
+    pub next_location_id: usize,
     pub inventory: Vec<String>,
     pub important_objects: Vec<String>,
     pub hypotheses: Vec<String>,
@@ -16,12 +20,33 @@ pub struct WorldModel {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Location {
-    #[serde(alias = "id")]
+    #[serde(default)]
+    pub id: String,
     pub title: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_descriptions: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub provisional: bool,
     pub exits: Vec<Exit>,
     pub objects: Vec<String>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocationMatchConfidence {
+    Exact,
+    Alias,
+    Probable,
+    New,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocationMatch {
+    pub key: String,
+    pub confidence: LocationMatchConfidence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -48,11 +73,25 @@ impl WorldModel {
                     if should_update_location_description(&loc.description, &location_description) {
                         loc.description = location_description.clone();
                     }
+                    add_unique(&mut loc.observed_descriptions, location_description.clone());
                 })
-                .or_insert(Location {
-                    title: location_title,
-                    description: location_description,
-                    ..Default::default()
+                .or_insert_with(|| {
+                    let aliases = self
+                        .location_aliases
+                        .iter()
+                        .filter_map(|(alias, target)| {
+                            (target == &self.current_location).then_some(alias.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    Location {
+                        id: self.current_location.clone(),
+                        title: location_title,
+                        description: location_description.clone(),
+                        aliases,
+                        observed_descriptions: vec![location_description.clone()],
+                        provisional: !looks_like_room_description(&location_description),
+                        ..Default::default()
+                    }
                 });
         }
 
@@ -79,12 +118,13 @@ impl WorldModel {
         command: &str,
         command_failed: bool,
     ) {
+        let previous_location = self.canonical_location_key(previous_location);
         if command_failed || self.current_location == previous_location {
-            self.apply_command_result_with_destination(previous_location, command, None);
+            self.apply_command_result_with_destination(&previous_location, command, None);
         } else {
             let destination = self.current_location.clone();
             self.apply_command_result_with_destination(
-                previous_location,
+                &previous_location,
                 command,
                 Some(&destination),
             );
@@ -103,12 +143,13 @@ impl WorldModel {
         if previous_location.trim().is_empty() {
             return;
         }
+        let previous_location = self.canonical_location_key(previous_location);
 
         let destination = destination
             .map(str::trim)
             .filter(|destination| !destination.is_empty())
-            .map(ToOwned::to_owned);
-        self.set_exit(previous_location, &direction, destination.clone(), true);
+            .map(|destination| self.canonical_location_key(destination));
+        self.set_exit(&previous_location, &direction, destination.clone(), true);
 
         let Some(dest) = destination else {
             return;
@@ -129,17 +170,19 @@ impl WorldModel {
         notes: &[String],
     ) {
         let target_location = if !location_hint.trim().is_empty() {
-            location_hint.trim()
+            self.canonical_location_key(location_hint)
         } else {
-            self.current_location.trim()
+            self.current_location.trim().to_string()
         };
 
         if !target_location.is_empty() {
             let location = self
                 .locations
-                .entry(target_location.to_string())
+                .entry(target_location.clone())
                 .or_insert_with(|| Location {
-                    title: target_location.to_string(),
+                    id: target_location.clone(),
+                    title: target_location.clone(),
+                    provisional: true,
                     ..Default::default()
                 });
 
@@ -213,33 +256,223 @@ impl WorldModel {
 
     pub fn location_key_for_snapshot(&mut self, title: &str, description: &str) -> String {
         let title = title.trim();
-        let matching_keys = self
-            .locations
-            .iter()
-            .filter_map(|(key, location)| (location.title == title).then_some(key))
-            .collect::<Vec<_>>();
-
-        if matching_keys.len() == 1 && !looks_like_room_description(description) {
-            return matching_keys[0].clone();
+        if let Some(location_match) = self.match_location_snapshot(title, description) {
+            if location_match.confidence != LocationMatchConfidence::New {
+                return location_match.key;
+            }
         }
 
-        if let Some(key) = self.locations.iter().find_map(|(key, location)| {
-            same_location_snapshot(location, title, description).then_some(key.clone())
-        }) {
+        if let Some(key) = self.match_single_title_for_context(title, description) {
             return key;
         }
 
-        let same_title_keys = self
+        self.create_location(title, description)
+    }
+
+    pub fn match_location_snapshot(&self, title: &str, description: &str) -> Option<LocationMatch> {
+        let title = title.trim();
+        if let Some(location_match) = self.exact_location_snapshot_match(title, description) {
+            return Some(location_match);
+        }
+
+        let title_alias = self.location_aliases.get(title).and_then(|key| {
+            self.locations.contains_key(key).then_some(LocationMatch {
+                key: key.clone(),
+                confidence: LocationMatchConfidence::Alias,
+            })
+        });
+        if title_alias.is_some() && !looks_like_room_description(description) {
+            return title_alias;
+        }
+
+        if looks_like_room_description(description) {
+            return None;
+        }
+
+        self.probable_location_by_transition_context(title)
+            .or_else(|| {
+                title_alias.and_then(|location_match| {
+                    self.locations
+                        .get(&location_match.key)
+                        .filter(|location| !location.provisional)
+                        .map(|_| location_match)
+                })
+            })
+    }
+
+    pub fn match_location_snapshot_with_context(
+        &self,
+        title: &str,
+        description: &str,
+        source_location: &str,
+        command: &str,
+    ) -> Option<LocationMatch> {
+        self.match_location_snapshot(title, description)
+            .or_else(|| {
+                self.probable_location_by_observed_transition(title, source_location, command)
+            })
+    }
+
+    pub fn canonical_location_key(&self, key: &str) -> String {
+        let key = key.trim();
+        if key.is_empty() {
+            return String::new();
+        }
+        if self.locations.contains_key(key) {
+            return key.to_string();
+        }
+        self.location_aliases
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| key.to_string())
+    }
+
+    fn match_single_title_for_context(&self, title: &str, description: &str) -> Option<String> {
+        let matching_keys = self
             .locations
             .iter()
             .filter_map(|(key, location)| (location.title == title).then_some(key.clone()))
             .collect::<Vec<_>>();
 
-        if same_title_keys.is_empty() {
-            return location_key_from_snapshot(title, description);
-        }
+        (matching_keys.len() == 1 && !looks_like_room_description(description))
+            .then(|| matching_keys[0].clone())
+    }
 
-        self.rekey_same_title_locations(title, description)
+    fn probable_location_by_transition_context(&self, title: &str) -> Option<LocationMatch> {
+        let candidates = self
+            .locations
+            .iter()
+            .filter_map(|(key, location)| (location.title == title).then_some(key.clone()))
+            .collect::<Vec<_>>();
+        if candidates.len() == 1 {
+            return Some(LocationMatch {
+                key: candidates[0].clone(),
+                confidence: LocationMatchConfidence::Probable,
+            });
+        }
+        None
+    }
+
+    fn exact_location_snapshot_match(
+        &self,
+        title: &str,
+        description: &str,
+    ) -> Option<LocationMatch> {
+        self.locations
+            .iter()
+            .find(|(_, location)| same_location_snapshot(location, title, description))
+            .map(|(key, _)| LocationMatch {
+                key: key.clone(),
+                confidence: LocationMatchConfidence::Exact,
+            })
+    }
+
+    fn probable_location_by_observed_transition(
+        &self,
+        title: &str,
+        source_location: &str,
+        command: &str,
+    ) -> Option<LocationMatch> {
+        let direction = normalize_direction(command)?;
+        let source_location = self.canonical_location_key(source_location);
+        let exit = self
+            .locations
+            .get(&source_location)?
+            .exits
+            .iter()
+            .find(|exit| {
+                normalize_direction(&exit.direction).as_deref() == Some(direction.as_str())
+            })?;
+        let mut candidates = exit
+            .transition_counts
+            .keys()
+            .chain(exit.destination.iter())
+            .map(|destination| self.canonical_location_key(destination))
+            .filter(|destination| {
+                self.locations
+                    .get(destination)
+                    .map(|location| location.title == title)
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates.dedup();
+        (candidates.len() == 1).then(|| LocationMatch {
+            key: candidates[0].clone(),
+            confidence: LocationMatchConfidence::Probable,
+        })
+    }
+
+    fn create_location(&mut self, title: &str, description: &str) -> String {
+        let key = self.next_stable_location_id();
+        let aliases = self.aliases_for_new_location(title, description, &key);
+        for alias in &aliases {
+            self.location_aliases.insert(alias.clone(), key.clone());
+        }
+        self.locations.insert(
+            key.clone(),
+            Location {
+                id: key.clone(),
+                title: title.to_string(),
+                description: description.to_string(),
+                aliases,
+                observed_descriptions: vec![description.to_string()],
+                provisional: !looks_like_room_description(description),
+                ..Default::default()
+            },
+        );
+        key
+    }
+
+    fn next_stable_location_id(&mut self) -> String {
+        if self.next_location_id == 0 {
+            self.next_location_id = self
+                .locations
+                .keys()
+                .filter_map(|key| key.strip_prefix("loc-"))
+                .filter_map(|suffix| suffix.parse::<usize>().ok())
+                .max()
+                .map(|max_id| max_id + 1)
+                .unwrap_or(1);
+        }
+        let id = format!("loc-{:06}", self.next_location_id);
+        self.next_location_id += 1;
+        id
+    }
+
+    fn aliases_for_new_location(&self, title: &str, description: &str, key: &str) -> Vec<String> {
+        let same_title_descriptions = self
+            .locations
+            .values()
+            .filter_map(|location| {
+                (location.title == title).then_some(location.description.as_str())
+            })
+            .chain(std::iter::once(description))
+            .collect::<Vec<_>>();
+        let readable = if same_title_descriptions.len() == 1 {
+            location_key_from_snapshot(title, description)
+        } else {
+            unique_location_key(
+                title,
+                description,
+                &same_title_descriptions,
+                &Vec::new(),
+                &self.locations,
+                key,
+            )
+        };
+        let mut aliases = vec![readable];
+        if !self
+            .locations
+            .values()
+            .any(|location| location.title == title)
+            && !self.location_aliases.contains_key(title)
+        {
+            aliases.push(title.to_string());
+        }
+        aliases.sort();
+        aliases.dedup();
+        aliases
     }
 
     fn set_exit(
@@ -249,11 +482,15 @@ impl WorldModel {
         destination: Option<String>,
         count_transition: bool,
     ) {
+        let from = self.canonical_location_key(from);
+        let destination = destination.map(|destination| self.canonical_location_key(&destination));
         let location = self
             .locations
-            .entry(from.to_string())
+            .entry(from.clone())
             .or_insert_with(|| Location {
-                title: from.to_string(),
+                id: from.clone(),
+                title: from.clone(),
+                provisional: true,
                 ..Default::default()
             });
 
@@ -287,81 +524,6 @@ impl WorldModel {
             });
         }
     }
-
-    fn rekey_same_title_locations(&mut self, title: &str, new_description: &str) -> String {
-        let mut entries = self
-            .locations
-            .iter()
-            .filter_map(|(key, location)| {
-                (location.title == title).then_some((key.clone(), location.clone()))
-            })
-            .collect::<Vec<_>>();
-        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-        entries.push((
-            String::new(),
-            Location {
-                title: title.to_string(),
-                description: new_description.to_string(),
-                ..Default::default()
-            },
-        ));
-
-        let descriptions = entries
-            .iter()
-            .map(|(_, location)| location.description.as_str())
-            .collect::<Vec<_>>();
-        let mut old_to_new = HashMap::new();
-        let mut planned_keys = Vec::new();
-        for (old_key, location) in &entries {
-            let planned = unique_location_key(
-                title,
-                &location.description,
-                &descriptions,
-                &planned_keys,
-                &self.locations,
-                old_key,
-            );
-            if !old_key.is_empty() {
-                old_to_new.insert(old_key.clone(), planned.clone());
-            }
-            planned_keys.push(planned);
-        }
-
-        let mut moved_locations = Vec::new();
-        for (old_key, new_key) in &old_to_new {
-            if old_key == new_key {
-                continue;
-            }
-            if let Some(location) = self.locations.remove(old_key) {
-                moved_locations.push((new_key.clone(), location));
-            }
-        }
-        for (new_key, location) in moved_locations {
-            self.locations.insert(new_key, location);
-        }
-        self.rewrite_location_references(&old_to_new);
-
-        planned_keys
-            .last()
-            .cloned()
-            .expect("new location key should be planned")
-    }
-
-    fn rewrite_location_references(&mut self, old_to_new: &HashMap<String, String>) {
-        if let Some(new_current) = old_to_new.get(&self.current_location) {
-            self.current_location = new_current.clone();
-        }
-
-        for location in self.locations.values_mut() {
-            for exit in &mut location.exits {
-                if let Some(destination) = &mut exit.destination {
-                    if let Some(new_destination) = old_to_new.get(destination) {
-                        *destination = new_destination.clone();
-                    }
-                }
-            }
-        }
-    }
 }
 
 fn preferred_destination(exit: &Exit, fallback: Option<&str>) -> Option<String> {
@@ -380,6 +542,12 @@ fn preferred_destination(exit: &Exit, fallback: Option<&str>) -> Option<String> 
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn add_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
 }
 
 fn normalize_direction(command: &str) -> Option<String> {
@@ -670,12 +838,20 @@ mod tests {
         world.update_from_observation("In Forest\nYou are in open forest near both a valley.");
         let second_key = world.current_location.clone();
 
-        assert!(
+        assert_eq!(
             world
                 .locations
-                .contains_key("In Forest. with a deep valley")
+                .values()
+                .filter(|location| location.title == "In Forest")
+                .count(),
+            2
         );
-        assert_eq!(second_key, "In Forest. near both a valley");
+        assert!(second_key.starts_with("loc-"));
+        assert_eq!(
+            world.location_aliases.get("In Forest. near both a valley"),
+            Some(&second_key)
+        );
+        assert!(!world.locations.contains_key("In Forest"));
     }
 
     #[test]
@@ -720,5 +896,47 @@ mod tests {
         assert_eq!(exit.transition_counts.get("C"), Some(&1));
         assert_eq!(exit.destination.as_deref(), Some("B"));
         assert!(exit.unstable);
+    }
+
+    #[test]
+    fn runtime_identity_uses_stable_ids_and_readable_aliases() {
+        let mut world = WorldModel::default();
+
+        world.update_from_observation("In Forest\nYou are in open forest, with a deep valley.");
+        let first_key = world.current_location.clone();
+        world.update_from_observation("In Forest\nYou are in open forest near both a valley.");
+        let second_key = world.current_location.clone();
+
+        assert!(first_key.starts_with("loc-"));
+        assert!(second_key.starts_with("loc-"));
+        assert_ne!(first_key, second_key);
+        assert_eq!(world.canonical_location_key("In Forest"), first_key);
+        assert_eq!(
+            world.canonical_location_key("In Forest. near both a valley"),
+            second_key
+        );
+        assert!(!world.locations.contains_key("In Forest"));
+    }
+
+    #[test]
+    fn transition_context_can_supply_probable_match() {
+        let mut world = WorldModel::default();
+        world.update_from_observation("A\nYou are in room A.");
+        let source = world.current_location.clone();
+        world.update_from_observation("B\nYou are in room B.");
+        let destination = world.current_location.clone();
+        world.apply_command_result_with_destination(&source, "east", Some(&destination));
+
+        let location_match = world
+            .match_location_snapshot_with_context(
+                "B",
+                "You are in room B after a change.",
+                &source,
+                "east",
+            )
+            .expect("transition context should identify destination");
+
+        assert_eq!(location_match.key, destination);
+        assert_eq!(location_match.confidence, LocationMatchConfidence::Probable);
     }
 }

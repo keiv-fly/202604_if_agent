@@ -272,10 +272,14 @@ fn final_map_artifact(
     first_nodes: &HashMap<String, FirstNode>,
 ) -> BTreeMap<String, FinalMapLocation> {
     let node_ids = first_node_ids_by_location(first_nodes);
+    let world_node_ids = world_model_node_ids(world, first_nodes, &node_ids);
     let mut locations = BTreeMap::new();
 
     for (source_key, location) in &world.locations {
-        let source = node_id_for_world_model_location(source_key, location, &node_ids);
+        let source = world_node_ids
+            .get(source_key)
+            .cloned()
+            .unwrap_or_else(|| node_id_for_world_model_location(source_key, location, &node_ids));
         let mut exits = BTreeMap::<String, BTreeMap<String, usize>>::new();
 
         for exit in &location.exits {
@@ -287,11 +291,12 @@ fn final_map_artifact(
             if exit.transition_counts.is_empty() {
                 if let Some(destination) = exit.destination.as_ref() {
                     destinations
-                        .entry(node_id_for_world_model_destination(
+                        .entry(node_id_for_world_model_destination_with_ids(
                             destination,
                             world,
                             first_nodes,
                             &node_ids,
+                            &world_node_ids,
                         ))
                         .or_insert(0);
                 }
@@ -300,11 +305,12 @@ fn final_map_artifact(
 
             for (destination, count) in &exit.transition_counts {
                 *destinations
-                    .entry(node_id_for_world_model_destination(
+                    .entry(node_id_for_world_model_destination_with_ids(
                         destination,
                         world,
                         first_nodes,
                         &node_ids,
+                        &world_node_ids,
                     ))
                     .or_insert(0) += *count;
             }
@@ -622,7 +628,7 @@ fn run_dfs_strategy(
                     }
                 };
                 let classified =
-                    planner.classify_observation(&attempt, &observation, command_failed);
+                    planner.classify_observation(&world, &attempt, &observation, command_failed);
                 logger.log(
                     "planner_observation_classification",
                     &format!(
@@ -1280,6 +1286,19 @@ fn node_id_for_world_model_destination(
         .unwrap_or_else(|| destination.to_string())
 }
 
+fn node_id_for_world_model_destination_with_ids(
+    destination: &str,
+    world: &WorldModel,
+    first_nodes: &HashMap<String, FirstNode>,
+    node_ids: &HashMap<(String, String), String>,
+    world_node_ids: &HashMap<String, String>,
+) -> String {
+    if let Some(node_id) = world_node_ids.get(destination) {
+        return node_id.clone();
+    }
+    node_id_for_world_model_destination(destination, world, first_nodes, node_ids)
+}
+
 fn node_id_for_world_state_location(
     key: &str,
     location: &WorldLocation,
@@ -1309,6 +1328,45 @@ fn node_id_for_world_model_location(
         ))
         .cloned()
         .unwrap_or_else(|| key.to_string())
+}
+
+fn world_model_node_ids(
+    world: &WorldModel,
+    first_nodes: &HashMap<String, FirstNode>,
+    node_ids: &HashMap<(String, String), String>,
+) -> HashMap<String, String> {
+    let mut entries = world
+        .locations
+        .iter()
+        .map(|(key, location)| {
+            (
+                key.clone(),
+                node_id_for_world_model_location(key, location, node_ids),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|(left_key, left_base), (right_key, right_base)| {
+        left_base
+            .cmp(right_base)
+            .then_with(|| left_key.cmp(right_key))
+    });
+
+    let mut seen = HashMap::<String, usize>::new();
+    entries
+        .into_iter()
+        .map(|(key, base)| {
+            let count = seen.entry(base.clone()).or_insert(0);
+            *count += 1;
+            let node_id = if *count == 1 && first_nodes.contains_key(&base) {
+                base
+            } else if *count == 1 {
+                base
+            } else {
+                format!("{base}{count}")
+            };
+            (key, node_id)
+        })
+        .collect()
 }
 
 fn normalize_score_text(text: &str) -> String {
@@ -1502,6 +1560,50 @@ mod tests {
                 .and_then(|location| location.exits.get("n"))
                 .and_then(|destinations| destinations.get("forest")),
             Some(&2)
+        );
+    }
+
+    #[test]
+    fn final_map_suffixes_duplicate_ground_truth_location_ids() {
+        let mut world = WorldModel::default();
+        world.locations.insert(
+            "loc-000001".to_string(),
+            Location {
+                title: "Forest".to_string(),
+                description: "You are in the forest.".to_string(),
+                ..Default::default()
+            },
+        );
+        world.locations.insert(
+            "loc-000002".to_string(),
+            Location {
+                title: "Forest".to_string(),
+                description: "You are in the forest.".to_string(),
+                ..Default::default()
+            },
+        );
+        world.apply_command_result_with_destination("loc-000001", "east", Some("loc-000002"));
+
+        let first_nodes = HashMap::from([(
+            "forest".to_string(),
+            FirstNode {
+                title: "Forest".to_string(),
+                description: "You are in the forest.".to_string(),
+                exits: HashMap::new(),
+                exits_to: HashMap::new(),
+            },
+        )]);
+
+        let final_map = final_map_artifact(&world, &first_nodes);
+
+        assert!(final_map.contains_key("forest"));
+        assert!(final_map.contains_key("forest2"));
+        assert_eq!(
+            final_map
+                .get("forest")
+                .and_then(|location| location.exits.get("e"))
+                .and_then(|destinations| destinations.get("forest2")),
+            Some(&1)
         );
     }
 }
