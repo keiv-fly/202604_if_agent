@@ -34,13 +34,13 @@ use planner::{
     normalize_move_command,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
 
 const DEFAULT_WORLD_STATE_PATH: &str = "memory_store/world-state.json";
-const DEFAULT_FIRST_NODES_PATH: &str = "eval_data/first_nodes.json";
+const DEFAULT_FIRST_NODES_PATH: &str = "eval_gt/map_gt_01.json";
 const DEFAULT_RUNS: usize = 3;
 const DEFAULT_STRATEGY: EvalStrategy = EvalStrategy::Dfs;
 const DEFAULT_COMMAND: &str = "Explore to create a full map. Only use the actions to move. Do not do any other actions that are not moves.";
@@ -87,6 +87,8 @@ struct FirstNode {
     title: String,
     description: String,
     exits: HashMap<String, HashMap<String, f64>>,
+    #[serde(default)]
+    exits_to: HashMap<String, HashMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +106,8 @@ struct EvalRun {
     share_of_titles_and_descriptions_info: String,
     share_of_exits: f64,
     share_of_exits_info: String,
+    share_exit_to: f64,
+    share_exit_to_info: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -116,6 +120,7 @@ struct EvalOutput {
     average_share_of_titles_found: f64,
     average_share_of_titles_and_descriptions: f64,
     average_share_of_exits: f64,
+    average_share_exit_to: f64,
 }
 
 fn main() -> Result<()> {
@@ -143,14 +148,16 @@ fn main() -> Result<()> {
 
     if args.calculate_only {
         let world_state = read_json::<WorldState>(&args.world_state_path)?;
+        write_world_state_exit_to_artifacts(&logger, 1, &world_state, &first_nodes)?;
         let scores = score_world_state(&world_state, &first_nodes);
         logger.log(
             "eval_run_score",
             &format!(
-                "run=1 titles={} title_descriptions={} exits={}",
+                "run=1 titles={} title_descriptions={} exits={} exit_to={}",
                 scores.share_of_titles_found,
                 scores.share_of_titles_and_descriptions,
-                scores.share_of_exits
+                scores.share_of_exits,
+                scores.share_exit_to
             ),
         );
         runs.push(EvalRun {
@@ -167,6 +174,8 @@ fn main() -> Result<()> {
             share_of_titles_and_descriptions_info: scores.share_of_titles_and_descriptions_info,
             share_of_exits: scores.share_of_exits,
             share_of_exits_info: scores.share_of_exits_info,
+            share_exit_to: scores.share_exit_to,
+            share_exit_to_info: scores.share_exit_to_info,
         });
     } else {
         for run in 1..=args.runs {
@@ -177,14 +186,19 @@ fn main() -> Result<()> {
             logger.log("eval_run_start", &format!("run={run}/{}", args.runs));
             let run_result = run_program(&args.command, args.strategy, args.dfs_max_turns, &logger)
                 .with_context(|| format!("failed during eval run {run}"))?;
+            write_final_map_artifact(&logger, run, &run_result.world)
+                .with_context(|| format!("failed to write final map for eval run {run}"))?;
+            write_world_model_exit_to_artifacts(&logger, run, &run_result.world, &first_nodes)
+                .with_context(|| format!("failed to write exit_to artifacts for eval run {run}"))?;
             let scores = score_world_model(&run_result.world, &first_nodes);
             logger.log(
                 "eval_run_score",
                 &format!(
-                    "run={run} titles={} title_descriptions={} exits={}",
+                    "run={run} titles={} title_descriptions={} exits={} exit_to={}",
                     scores.share_of_titles_found,
                     scores.share_of_titles_and_descriptions,
-                    scores.share_of_exits
+                    scores.share_of_exits,
+                    scores.share_exit_to
                 ),
             );
             runs.push(EvalRun {
@@ -201,6 +215,8 @@ fn main() -> Result<()> {
                 share_of_titles_and_descriptions_info: scores.share_of_titles_and_descriptions_info,
                 share_of_exits: scores.share_of_exits,
                 share_of_exits_info: scores.share_of_exits_info,
+                share_exit_to: scores.share_exit_to,
+                share_exit_to_info: scores.share_exit_to_info,
             });
         }
     }
@@ -213,6 +229,7 @@ fn main() -> Result<()> {
         average_share_of_titles_found: average_titles(&runs),
         average_share_of_titles_and_descriptions: average_title_descriptions(&runs),
         average_share_of_exits: average_exits(&runs),
+        average_share_exit_to: average_exit_to(&runs),
         runs,
     };
 
@@ -221,6 +238,69 @@ fn main() -> Result<()> {
     logger.log("eval_result", &output_json);
     println!("{output_json}");
 
+    Ok(())
+}
+
+fn write_final_map_artifact(logger: &SessionLogger, run: usize, world: &WorldModel) -> Result<()> {
+    let path = logger
+        .llm_dir()
+        .join(format!("run-{run:03}-final-map.json"));
+    let json = serde_json::to_string_pretty(world).context("serialize final map to JSON")?;
+    fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    logger.log(
+        "eval_final_map",
+        &format!("run={run} path={}", path.display()),
+    );
+    Ok(())
+}
+
+fn write_world_state_exit_to_artifacts(
+    logger: &SessionLogger,
+    run: usize,
+    world_state: &WorldState,
+    first_nodes: &HashMap<String, FirstNode>,
+) -> Result<()> {
+    let actual = exit_to_items_from_exit_items(&world_state_exit_items(world_state, first_nodes));
+    write_exit_to_artifacts(logger, run, actual, first_nodes)
+}
+
+fn write_world_model_exit_to_artifacts(
+    logger: &SessionLogger,
+    run: usize,
+    world: &WorldModel,
+    first_nodes: &HashMap<String, FirstNode>,
+) -> Result<()> {
+    let actual = exit_to_items_from_exit_items(&world_model_exit_items(world, first_nodes));
+    write_exit_to_artifacts(logger, run, actual, first_nodes)
+}
+
+fn write_exit_to_artifacts(
+    logger: &SessionLogger,
+    run: usize,
+    actual: Vec<ExitToItem>,
+    first_nodes: &HashMap<String, FirstNode>,
+) -> Result<()> {
+    let expected = first_node_exit_to_items(first_nodes);
+    let actual_path = logger.llm_dir().join(format!("run-{run:03}-exit-to.json"));
+    let diff_path = logger
+        .llm_dir()
+        .join(format!("run-{run:03}-exit-to-diff.json"));
+    let actual_json = serde_json::to_string_pretty(&exit_to_destination_map(&actual))
+        .context("serialize exit_to")?;
+    let diff_json = serde_json::to_string_pretty(&exit_to_diff(&expected, &actual))
+        .context("serialize exit_to diff")?;
+
+    fs::write(&actual_path, actual_json)
+        .with_context(|| format!("write {}", actual_path.display()))?;
+    fs::write(&diff_path, diff_json).with_context(|| format!("write {}", diff_path.display()))?;
+    logger.log(
+        "eval_exit_to_artifacts",
+        &format!(
+            "run={run} actual={} diff={}",
+            actual_path.display(),
+            diff_path.display()
+        ),
+    );
     Ok(())
 }
 
@@ -696,6 +776,8 @@ struct Scores {
     share_of_titles_and_descriptions_info: String,
     share_of_exits: f64,
     share_of_exits_info: String,
+    share_exit_to: f64,
+    share_exit_to_info: String,
 }
 
 fn score_world_state(world_state: &WorldState, first_nodes: &HashMap<String, FirstNode>) -> Scores {
@@ -759,14 +841,19 @@ fn score_values(
     let actual_title_description_count = world_title_descriptions.len();
     let ground_truth_title_description_count = expected_title_descriptions.len();
     let expected_exits = first_node_exit_items(first_nodes);
+    let expected_exit_to = first_node_exit_to_items(first_nodes);
+    let actual_exit_to = exit_to_items_from_exit_items(&world_exits);
     let actual_exit_count = world_exits.len();
     let ground_truth_exit_count = expected_exits.len();
+    let actual_exit_to_count = actual_exit_to.len();
+    let ground_truth_exit_to_count = expected_exit_to.len();
     let world_title_nodes = disambiguate_duplicate_titles(world_titles);
     let expected_title_nodes = disambiguate_duplicate_titles(expected_titles);
     let title_score = multiset_jaccard(&world_title_nodes, &expected_title_nodes);
     let title_description_score =
         multiset_jaccard(&world_title_descriptions, &expected_title_descriptions);
     let exit_score = multiset_jaccard(&world_exits, &expected_exits);
+    let exit_to_score = multiset_jaccard(&actual_exit_to, &expected_exit_to);
 
     Scores {
         share_of_titles_found: title_score.value,
@@ -778,6 +865,8 @@ fn score_values(
         ),
         share_of_exits: exit_score.value,
         share_of_exits_info: exit_score.info(actual_exit_count, ground_truth_exit_count),
+        share_exit_to: exit_to_score.value,
+        share_exit_to_info: exit_to_score.info(actual_exit_to_count, ground_truth_exit_to_count),
     }
 }
 
@@ -785,6 +874,25 @@ fn score_values(
 struct ExitItem {
     source: String,
     direction: String,
+    destination: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ExitToItem {
+    source: String,
+    destination: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ExitToDiff {
+    shared_by_both: Vec<ExitToPair>,
+    missing_in_actual: Vec<ExitToPair>,
+    extra_in_actual: Vec<ExitToPair>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExitToPair {
+    source: String,
     destination: String,
 }
 
@@ -805,6 +913,108 @@ fn first_node_exit_items(first_nodes: &HashMap<String, FirstNode>) -> Vec<ExitIt
                 })
         })
         .collect()
+}
+
+fn first_node_exit_to_items(first_nodes: &HashMap<String, FirstNode>) -> Vec<ExitToItem> {
+    unique_exit_to_items(
+        first_nodes
+            .iter()
+            .flat_map(|(source, node)| {
+                if node.exits_to.is_empty() {
+                    derived_first_node_exit_to_items(source, node)
+                } else {
+                    node.exits_to
+                        .keys()
+                        .map(|destination| ExitToItem {
+                            source: source.clone(),
+                            destination: destination.clone(),
+                        })
+                        .collect()
+                }
+            })
+            .collect(),
+    )
+}
+
+fn derived_first_node_exit_to_items(source: &str, node: &FirstNode) -> Vec<ExitToItem> {
+    unique_exit_to_items(
+        node.exits
+            .values()
+            .flat_map(|destinations| destinations.keys())
+            .map(|destination| ExitToItem {
+                source: source.to_string(),
+                destination: destination.clone(),
+            })
+            .collect(),
+    )
+}
+
+fn exit_to_items_from_exit_items(exits: &[ExitItem]) -> Vec<ExitToItem> {
+    unique_exit_to_items(
+        exits
+            .iter()
+            .map(|exit| ExitToItem {
+                source: exit.source.clone(),
+                destination: exit.destination.clone(),
+            })
+            .collect(),
+    )
+}
+
+fn unique_exit_to_items(items: Vec<ExitToItem>) -> Vec<ExitToItem> {
+    let mut seen = HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| seen.insert(item.clone()))
+        .collect()
+}
+
+fn exit_to_destination_map(items: &[ExitToItem]) -> BTreeMap<String, Vec<String>> {
+    let mut destinations_by_source = BTreeMap::<String, BTreeSet<String>>::new();
+    for item in items {
+        destinations_by_source
+            .entry(item.source.clone())
+            .or_default()
+            .insert(item.destination.clone());
+    }
+
+    destinations_by_source
+        .into_iter()
+        .map(|(source, destinations)| (source, destinations.into_iter().collect()))
+        .collect()
+}
+
+fn exit_to_diff(expected: &[ExitToItem], actual: &[ExitToItem]) -> ExitToDiff {
+    let expected_pairs = exit_to_pair_set(expected);
+    let actual_pairs = exit_to_pair_set(actual);
+    ExitToDiff {
+        shared_by_both: expected_pairs
+            .intersection(&actual_pairs)
+            .map(exit_to_pair_from_tuple)
+            .collect(),
+        missing_in_actual: expected_pairs
+            .difference(&actual_pairs)
+            .map(exit_to_pair_from_tuple)
+            .collect(),
+        extra_in_actual: actual_pairs
+            .difference(&expected_pairs)
+            .map(exit_to_pair_from_tuple)
+            .collect(),
+    }
+}
+
+fn exit_to_pair_set(items: &[ExitToItem]) -> BTreeSet<(String, String)> {
+    items
+        .iter()
+        .map(|item| (item.source.clone(), item.destination.clone()))
+        .collect()
+}
+
+fn exit_to_pair_from_tuple(pair: &(String, String)) -> ExitToPair {
+    ExitToPair {
+        source: pair.0.clone(),
+        destination: pair.1.clone(),
+    }
 }
 
 fn world_state_exit_items(
@@ -1009,6 +1219,14 @@ fn average_exits(runs: &[EvalRun]) -> f64 {
     }
 
     runs.iter().map(|run| run.share_of_exits).sum::<f64>() / runs.len() as f64
+}
+
+fn average_exit_to(runs: &[EvalRun]) -> f64 {
+    if runs.is_empty() {
+        return 0.0;
+    }
+
+    runs.iter().map(|run| run.share_exit_to).sum::<f64>() / runs.len() as f64
 }
 
 fn read_json<T>(path: &str) -> Result<T>

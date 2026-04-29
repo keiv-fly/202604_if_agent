@@ -1,0 +1,238 @@
+{
+  "end_of_road": {
+    "title": "At End Of Road",
+    "description": "You are standing at the end of a road before a small brick building. Around you is a forest. A small stream flows out of the building and down a gully.",
+    "exits": {
+      "n": {
+        "forest_near_road": 100
+      },
+      "e": {
+        "inside_building": 100
+      },
+      "w": {
+        "hill_in_road": 100
+      },
+      "s": {
+        "valley": 100
+      }
+    },
+    "exits_to": {
+      "forest_near_road": {
+        "n": "det"
+      },
+      "inside_building": {
+        "e": "det"
+      },
+      "hill_in_road": {
+        "w": "det"
+      },
+      "valley": {
+        "s": "det"
+      }
+    },
+    "moves": []
+  },
+  "forest_deep_valley": {
+    "title": "In Forest",
+    "description": "You are in open forest, with a deep valley to one side.",
+    "exits": {
+      "n": {
+        "forest_deep_valley": 100
+      },
+      "s": {
+        "forest_deep_valley": 100
+      },
+      "w": {
+        "forest_deep_valley": 100
+      },
+      "e": {
+        "valley": 100
+      }
+    },
+    "exits_to": {
+      "forest_deep_valley": {
+        "n": "det",
+        "s": "det",
+        "w": "det"
+      },
+      "valley": {
+        "e": "det"
+      }
+    },
+    "moves": [
+      "n"
+    ]
+  },
+  "inside_building": {
+    "title": "Inside Building",
+    "description": "You are inside a building, a well house for a large spring.",
+    "exits": {
+      "w": {
+        "end_of_road": 100
+      },
+      "n": {
+        "inside_building": 100
+      },
+      "s": {
+        "inside_building": 100
+      }
+    },
+    "exits_to": {
+      "end_of_road": {
+        "w": "det"
+      },
+      "inside_building": {
+        "n": "det",
+        "s": "det"
+      }
+    },
+    "moves": [
+      "e"
+    ]
+  },
+  "hill_in_road": {
+    "title": "At Hill In Road",
+    "description": "You have walked up a hill, still in the forest. The road slopes back down the other side of the hill. There is a building in the distance.",
+    "exits": {
+      "e": {
+        "end_of_road": 100
+      },
+      "n": {
+        "end_of_road": 100
+      },
+      "w": {
+        "hill_in_road": 100
+      },
+      "s": {
+        "forest_near_road": 75,
+        "forest_deep_valley": 25
+      }
+    },
+    "exits_to": {
+      "end_of_road": {
+        "e": "det",
+        "n": "det"
+      },
+      "hill_in_road": {
+        "w": "det"
+      },
+      "forest_near_road": {
+        "s": "prob"
+      },
+      "forest_deep_valley": {
+        "s": "prob"
+      }
+    },
+    "moves": [
+      "w"
+    ]
+  },
+  "valley": {
+    "title": "In A Valley",
+    "description": "You are in a valley in the forest beside a stream tumbling along a rocky bed.",
+    "exits": {
+      "e": {
+        "forest_near_road": 100
+      },
+      "w": {
+        "forest_near_road": 100
+      },
+      "s": {
+        "slit_in_streambed": 100
+      },
+      "n": {
+        "end_of_road": 100
+      }
+    },
+    "exits_to": {
+      "forest_near_road": {
+        "e": "det",
+        "w": "det"
+      },
+      "slit_in_streambed": {
+        "s": "det"
+      },
+      "end_of_road": {
+        "n": "det"
+      }
+    },
+    "moves": [
+      "s"
+    ]
+  },
+  "forest_near_road": {
+    "title": "In Forest",
+    "description": "You are in open forest near both a valley and a road.",
+    "exits": {
+      "n": {
+        "forest_deep_valley": 100
+      },
+      "s": {
+        "forest_deep_valley": 75,
+        "forest_near_road": 25
+      },
+      "w": {
+        "forest_deep_valley": 75,
+        "valley": 25
+      },
+      "e": {
+        "valley": 100
+      }
+    },
+    "exits_to": {
+      "forest_deep_valley": {
+        "n": "det",
+        "s": "prob",
+        "w": "prob"
+      },
+      "forest_near_road": {
+        "s": "prob"
+      },
+      "valley": {
+        "w": "prob",
+        "e": "det"
+      }
+    },
+    "moves": [
+      "d",
+      "u"
+    ]
+  },
+  "slit_in_streambed": {
+    "title": "At Slit In Streambed",
+    "description": "At your feet all the water of the stream splashes into a 2-inch slit in the rock. Downstream the streambed is bare rock.",
+    "exits": {
+      "s": {
+        "outside_grate": 100
+      }
+    },
+    "exits_to": {
+      "outside_grate": {
+        "s": "det"
+      }
+    },
+    "moves": [
+      "s",
+      "s"
+    ]
+  },
+  "outside_grate": {
+    "title": "Outside Grate",
+    "description": "You are in a 20-foot depression floored with bare dirt. Set into the dirt is a strong steel grate mounted in concrete. A dry streambed leads into the depression.",
+    "exits": {
+      "n": {
+        "valley": 100
+      }
+    },
+    "exits_to": {
+      "valley": {
+        "n": "det"
+      }
+    },
+    "moves": [
+      "s",
+      "s",
+      "s"
+    ]
+  }
+}

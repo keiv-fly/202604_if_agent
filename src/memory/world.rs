@@ -182,18 +182,35 @@ impl WorldModel {
         lines.join("\n")
     }
 
-    pub fn location_key_for_snapshot(&self, title: &str, description: &str) -> String {
+    pub fn location_key_for_snapshot(&mut self, title: &str, description: &str) -> String {
+        let title = title.trim();
         let matching_keys = self
             .locations
             .iter()
-            .filter_map(|(key, location)| (location.title == title.trim()).then_some(key))
+            .filter_map(|(key, location)| (location.title == title).then_some(key))
             .collect::<Vec<_>>();
 
         if matching_keys.len() == 1 && !looks_like_room_description(description) {
             return matching_keys[0].clone();
         }
 
-        location_key_from_snapshot(title, description)
+        if let Some(key) = self.locations.iter().find_map(|(key, location)| {
+            same_location_snapshot(location, title, description).then_some(key.clone())
+        }) {
+            return key;
+        }
+
+        let same_title_keys = self
+            .locations
+            .iter()
+            .filter_map(|(key, location)| (location.title == title).then_some(key.clone()))
+            .collect::<Vec<_>>();
+
+        if same_title_keys.is_empty() {
+            return location_key_from_snapshot(title, description);
+        }
+
+        self.rekey_same_title_locations(title, description)
     }
 
     fn set_exit(&mut self, from: &str, direction: &str, destination: Option<String>) {
@@ -216,6 +233,81 @@ impl WorldModel {
                 direction: direction.to_string(),
                 destination,
             });
+        }
+    }
+
+    fn rekey_same_title_locations(&mut self, title: &str, new_description: &str) -> String {
+        let mut entries = self
+            .locations
+            .iter()
+            .filter_map(|(key, location)| {
+                (location.title == title).then_some((key.clone(), location.clone()))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        entries.push((
+            String::new(),
+            Location {
+                title: title.to_string(),
+                description: new_description.to_string(),
+                ..Default::default()
+            },
+        ));
+
+        let descriptions = entries
+            .iter()
+            .map(|(_, location)| location.description.as_str())
+            .collect::<Vec<_>>();
+        let mut old_to_new = HashMap::new();
+        let mut planned_keys = Vec::new();
+        for (old_key, location) in &entries {
+            let planned = unique_location_key(
+                title,
+                &location.description,
+                &descriptions,
+                &planned_keys,
+                &self.locations,
+                old_key,
+            );
+            if !old_key.is_empty() {
+                old_to_new.insert(old_key.clone(), planned.clone());
+            }
+            planned_keys.push(planned);
+        }
+
+        let mut moved_locations = Vec::new();
+        for (old_key, new_key) in &old_to_new {
+            if old_key == new_key {
+                continue;
+            }
+            if let Some(location) = self.locations.remove(old_key) {
+                moved_locations.push((new_key.clone(), location));
+            }
+        }
+        for (new_key, location) in moved_locations {
+            self.locations.insert(new_key, location);
+        }
+        self.rewrite_location_references(&old_to_new);
+
+        planned_keys
+            .last()
+            .cloned()
+            .expect("new location key should be planned")
+    }
+
+    fn rewrite_location_references(&mut self, old_to_new: &HashMap<String, String>) {
+        if let Some(new_current) = old_to_new.get(&self.current_location) {
+            self.current_location = new_current.clone();
+        }
+
+        for location in self.locations.values_mut() {
+            for exit in &mut location.exits {
+                if let Some(destination) = &mut exit.destination {
+                    if let Some(new_destination) = old_to_new.get(destination) {
+                        *destination = new_destination.clone();
+                    }
+                }
+            }
         }
     }
 }
@@ -310,17 +402,110 @@ fn is_location_title_line(line: &str) -> bool {
 }
 
 pub fn location_key_from_snapshot(title: &str, description: &str) -> String {
-    let title = title.trim();
-    if description.trim().is_empty() {
-        return title.to_string();
+    let _ = description;
+    title.trim().to_string()
+}
+
+fn same_location_snapshot(location: &Location, title: &str, description: &str) -> bool {
+    location.title == title.trim()
+        && normalized_key_material(&location.description) == normalized_key_material(description)
+}
+
+fn unique_location_key(
+    title: &str,
+    description: &str,
+    descriptions: &[&str],
+    planned_keys: &[String],
+    locations: &HashMap<String, Location>,
+    current_key: &str,
+) -> String {
+    let base_key = location_key_with_distinguishing_words(title, description, descriptions);
+    let normalized = normalized_key_material(description);
+    let descriptions_are_same = descriptions
+        .iter()
+        .all(|candidate| normalized_key_material(candidate) == normalized);
+    if !descriptions_are_same && key_is_available(&base_key, planned_keys, locations, current_key) {
+        return base_key;
     }
 
+    let hash = description_hash(description);
+    for hash_len in 7..=hash.len() {
+        let candidate = format!("{base_key}#{}", &hash[..hash_len]);
+        if key_is_available(&candidate, planned_keys, locations, current_key) {
+            return candidate;
+        }
+    }
+
+    base_key
+}
+
+fn location_key_with_distinguishing_words(
+    title: &str,
+    description: &str,
+    descriptions: &[&str],
+) -> String {
+    let normalized_description = normalized_key_material(description);
+    if normalized_description.is_empty() {
+        return title.trim().to_string();
+    }
+    if descriptions
+        .iter()
+        .all(|candidate| normalized_key_material(candidate) == normalized_description)
+    {
+        return format!("{}.", title.trim());
+    }
+
+    let start = common_prefix_char_len(descriptions)
+        .min(normalized_description.chars().count().saturating_sub(1));
+    let suffix = normalized_description
+        .chars()
+        .skip(start)
+        .take(20)
+        .collect::<String>()
+        .trim()
+        .to_string();
+
+    format!("{}. {}", title.trim(), suffix)
+}
+
+fn common_prefix_char_len(descriptions: &[&str]) -> usize {
+    let Some(first) = descriptions.first() else {
+        return 0;
+    };
+    let first_chars = normalized_key_material(first).chars().collect::<Vec<_>>();
+    let mut len = first_chars.len();
+    for description in descriptions.iter().skip(1) {
+        let chars = normalized_key_material(description)
+            .chars()
+            .collect::<Vec<_>>();
+        len = len.min(
+            first_chars
+                .iter()
+                .zip(chars.iter())
+                .take_while(|(left, right)| left == right)
+                .count(),
+        );
+    }
+    len
+}
+
+fn key_is_available(
+    key: &str,
+    planned_keys: &[String],
+    locations: &HashMap<String, Location>,
+    current_key: &str,
+) -> bool {
+    !planned_keys.iter().any(|planned| planned == key)
+        && (!locations.contains_key(key) || key == current_key)
+}
+
+fn description_hash(description: &str) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in normalized_key_material(description).as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    format!("{title}#{hash:08x}")
+    format!("{hash:016x}")
 }
 
 fn looks_like_room_description(description: &str) -> bool {
@@ -342,11 +527,17 @@ fn should_update_location_description(existing: &str, next: &str) -> bool {
 }
 
 fn normalized_key_material(text: &str) -> String {
+    normalized_words(text).join(" ")
+}
+
+fn normalized_words(text: &str) -> Vec<String> {
     text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_lowercase()
+        .map(|word| {
+            word.trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|word| !word.is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -390,6 +581,50 @@ mod tests {
                 .expect("location should remain known")
                 .description,
             "You are inside a building, a well house for a large spring."
+        );
+    }
+
+    #[test]
+    fn location_key_uses_only_title_without_duplicates() {
+        assert_eq!(
+            location_key_from_snapshot("In Forest", "You are in open forest, with a deep valley."),
+            "In Forest"
+        );
+    }
+
+    #[test]
+    fn repeated_location_titles_use_first_twenty_different_description_characters() {
+        let mut world = WorldModel::default();
+        world.update_from_observation("In Forest\nYou are in open forest, with a deep valley.");
+
+        world.update_from_observation("In Forest\nYou are in open forest near both a valley.");
+        let second_key = world.current_location.clone();
+
+        assert!(
+            world
+                .locations
+                .contains_key("In Forest. with a deep valley")
+        );
+        assert_eq!(second_key, "In Forest. near both a valley");
+    }
+
+    #[test]
+    fn location_key_adds_hash_when_different_words_are_not_enough() {
+        let locations = HashMap::new();
+        let planned = vec!["In Forest. you are in".to_string()];
+        let key = unique_location_key(
+            "In Forest",
+            "You are in open forest.",
+            &["You are in open forest.", "You are in open forest."],
+            &planned,
+            &locations,
+            "",
+        );
+
+        assert!(key.starts_with("In Forest.#"));
+        assert_eq!(
+            key.strip_prefix("In Forest.#").expect("hash suffix").len(),
+            7
         );
     }
 }

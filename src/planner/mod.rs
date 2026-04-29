@@ -484,22 +484,22 @@ fn location_key_for_snapshot(
     title: &str,
     description: &str,
 ) -> String {
+    let base_key = location_key_from_snapshot(title, description);
+    let title_prefix = format!("{}. ", title.trim());
     let matching_keys = known_location_keys
         .iter()
         .filter(|key| {
-            *key == title
-                || key
-                    .strip_prefix(title)
-                    .map(|suffix| suffix.starts_with('#'))
-                    .unwrap_or(false)
+            *key == &base_key
+                || key.strip_prefix(&format!("{base_key}#")).is_some()
+                || key.starts_with(&title_prefix)
         })
         .collect::<Vec<_>>();
 
-    if matching_keys.len() == 1 && !looks_like_room_description(description) {
+    if matching_keys.len() == 1 {
         return matching_keys[0].clone();
     }
 
-    location_key_from_snapshot(title, description)
+    base_key
 }
 
 fn looks_like_room_description(description: &str) -> bool {
@@ -795,7 +795,7 @@ mod tests {
             planner
                 .frontier()
                 .iter()
-                .any(|action| action.source_location_key.starts_with("Clearing#"))
+                .any(|action| { action.source_location_key.starts_with("Clearing") })
         );
     }
 }
