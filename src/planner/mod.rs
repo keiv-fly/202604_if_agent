@@ -116,6 +116,7 @@ pub struct ObservationUpdate {
 pub enum ObservationClassification {
     MovedToKnownLocation,
     MovedToNewLocation,
+    MovedToSameLocation,
     CommandFailedOrBlocked,
 }
 
@@ -338,8 +339,8 @@ impl DfsPlanner {
             && new_observation_signature == attempt.previous_observation_signature
         {
             return ClassifiedObservation {
-                classification: ObservationClassification::CommandFailedOrBlocked,
-                blocked_reason: Some("same_location_response".to_string()),
+                classification: ObservationClassification::MovedToSameLocation,
+                blocked_reason: None,
                 new_observation_signature: Some(new_observation_signature),
                 raw_output_hash,
                 current_location_unchanged: true,
@@ -353,8 +354,8 @@ impl DfsPlanner {
             .unwrap_or_default();
         if observed_location == attempt.source_location_key {
             return ClassifiedObservation {
-                classification: ObservationClassification::CommandFailedOrBlocked,
-                blocked_reason: Some("same_location_response".to_string()),
+                classification: ObservationClassification::MovedToSameLocation,
+                blocked_reason: None,
                 new_observation_signature: Some(new_observation_signature),
                 raw_output_hash,
                 current_location_unchanged: true,
@@ -712,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn same_location_response_is_failed_and_keeps_current_location() {
+    fn same_location_response_is_moved_to_same_location() {
         let world = world_at("Forest", "You are standing in a forest.");
         let mut planner = DfsPlanner::new(&world);
         let attempt = selected_attempt(&mut planner, &world);
@@ -722,13 +723,62 @@ mod tests {
 
         assert_eq!(
             classified.classification,
-            ObservationClassification::CommandFailedOrBlocked
+            ObservationClassification::MovedToSameLocation
         );
-        assert_eq!(
-            classified.blocked_reason.as_deref(),
-            Some("same_location_response")
-        );
+        assert_eq!(classified.blocked_reason, None);
         assert!(classified.current_location_unchanged);
+    }
+
+    #[test]
+    fn same_location_move_marks_frontier_explored_with_source_destination() {
+        let mut world = world_at("Forest", "You are standing in a forest.");
+        let mut planner = DfsPlanner::new(&world);
+        let attempt = selected_attempt(&mut planner, &world);
+        let response = "Forest\nYou are standing in a forest.";
+
+        let classified = planner.classify_observation(&attempt, response, false);
+        world.update_from_observation(response);
+        world.apply_command_result_with_destination(
+            &attempt.source_location_key,
+            &attempt.command,
+            Some(&attempt.source_location_key),
+        );
+        planner.apply_observation(
+            ObservationUpdate {
+                attempt: attempt.clone(),
+                current_location: location_key(&world),
+                classification: classified.classification,
+                blocked_reason: classified.blocked_reason,
+                raw_output_hash: classified.raw_output_hash,
+            },
+            &world,
+        );
+
+        let frontier = planner
+            .frontier()
+            .iter()
+            .find(|action| action.id == attempt.frontier_id.as_deref().unwrap())
+            .expect("frontier should exist");
+        assert_eq!(frontier.status, FrontierStatus::Explored);
+        assert_eq!(frontier.expected_destination.as_deref(), Some("Forest"));
+        assert_eq!(
+            world
+                .locations
+                .get("Forest")
+                .and_then(|location| location
+                    .exits
+                    .iter()
+                    .find(|exit| exit.direction == attempt.command))
+                .and_then(|exit| exit.destination.as_deref()),
+            Some("Forest")
+        );
+        assert!(
+            planner
+                .blocked_edges()
+                .get("Forest")
+                .and_then(|commands| commands.get(&attempt.command))
+                .is_none()
+        );
     }
 
     #[test]

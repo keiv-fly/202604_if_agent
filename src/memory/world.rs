@@ -75,6 +75,24 @@ impl WorldModel {
         command: &str,
         command_failed: bool,
     ) {
+        if command_failed || self.current_location == previous_location {
+            self.apply_command_result_with_destination(previous_location, command, None);
+        } else {
+            let destination = self.current_location.clone();
+            self.apply_command_result_with_destination(
+                previous_location,
+                command,
+                Some(&destination),
+            );
+        }
+    }
+
+    pub fn apply_command_result_with_destination(
+        &mut self,
+        previous_location: &str,
+        command: &str,
+        destination: Option<&str>,
+    ) {
         let Some(direction) = normalize_direction(command) else {
             return;
         };
@@ -82,14 +100,19 @@ impl WorldModel {
             return;
         }
 
-        let destination = if command_failed || self.current_location == previous_location {
-            None
-        } else {
-            Some(self.current_location.clone())
-        };
+        let destination = destination
+            .map(str::trim)
+            .filter(|destination| !destination.is_empty())
+            .map(ToOwned::to_owned);
         self.set_exit(previous_location, &direction, destination.clone());
 
-        if let (Some(dest), Some(reverse)) = (destination, reverse_direction(&direction)) {
+        let Some(dest) = destination else {
+            return;
+        };
+        if dest == previous_location {
+            return;
+        }
+        if let Some(reverse) = reverse_direction(&direction) {
             self.set_exit(&dest, reverse, Some(previous_location.to_string()));
         }
     }

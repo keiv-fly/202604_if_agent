@@ -578,7 +578,11 @@ fn run_dfs_strategy(
                     } else {
                         world.update_from_observation(&observation);
                     }
-                    world.apply_command_result(&previous_location, &command, false);
+                    world.apply_command_result_with_destination(
+                        &previous_location,
+                        &command,
+                        Some(&location_key(&world)),
+                    );
                 }
                 logger.log("game_output", &observation);
                 print_game_output(&observation);
