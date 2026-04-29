@@ -52,6 +52,14 @@ impl SessionLogger {
         &self.llm_dir
     }
 
+    pub fn session_id(&self) -> String {
+        self.llm_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session")
+            .to_string()
+    }
+
     pub fn next_llm_call_number(&self) -> usize {
         self.llm_call_counter.fetch_add(1, Ordering::SeqCst) + 1
     }

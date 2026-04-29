@@ -18,7 +18,9 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
+use std::fs;
 use std::io;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 fn append_history_cell(history_lines: &mut Vec<String>, title: &str, body: &str, width: usize) {
@@ -217,6 +219,7 @@ fn ui_loop<B: ratatui::backend::Backend>(
     let mut input_history = Vec::<String>::new();
     let mut history_cursor: Option<usize> = None;
     let mut active_task: Option<AgentTask> = None;
+    let mut map_export_count = 0usize;
     let mut pending_agent_thought: Option<String> = None;
     let mut last_agent_tick = Instant::now();
 
@@ -381,6 +384,7 @@ fn ui_loop<B: ratatui::backend::Backend>(
                                 &mut history_lines,
                                 history_area_width,
                                 &mut active_task,
+                                &mut map_export_count,
                             )? {
                                 break;
                             }
@@ -455,6 +459,7 @@ fn ui_loop<B: ratatui::backend::Backend>(
                                 &mut history_lines,
                                 history_area_width,
                                 &mut active_task,
+                                &mut map_export_count,
                             )? {
                                 break;
                             }
@@ -508,6 +513,7 @@ fn handle_input(
     history_lines: &mut Vec<String>,
     history_width: usize,
     active_task: &mut Option<AgentTask>,
+    map_export_count: &mut usize,
 ) -> anyhow::Result<bool> {
     if line.is_empty() {
         return Ok(false);
@@ -545,6 +551,32 @@ fn handle_input(
         return Ok(false);
     }
 
+    if line == "map" {
+        *map_export_count += 1;
+        match save_session_map(world, logger, *map_export_count) {
+            Ok(path) => {
+                logger.log("map_saved", &path.display().to_string());
+                append_history_cell(
+                    history_lines,
+                    "SYSTEM MESSAGE",
+                    &format!("Map saved: {}", path.display()),
+                    history_width,
+                );
+            }
+            Err(err) => {
+                *map_export_count = map_export_count.saturating_sub(1);
+                logger.log("map_save_error", &err.to_string());
+                append_history_cell(
+                    history_lines,
+                    "SYSTEM MESSAGE",
+                    &format!("Failed to save map: {err}"),
+                    history_width,
+                );
+            }
+        }
+        return Ok(false);
+    }
+
     if let Some(cmd) = line.strip_prefix("/send") {
         let cmd = cmd.trim();
         append_history_cell(history_lines, "USER COMMAND", cmd, history_width);
@@ -576,4 +608,16 @@ fn handle_input(
         history_width,
     );
     Ok(false)
+}
+
+fn save_session_map(
+    world: &WorldModel,
+    logger: &SessionLogger,
+    map_number: usize,
+) -> anyhow::Result<PathBuf> {
+    fs::create_dir_all("maps")?;
+    let path = PathBuf::from("maps").join(format!("{}_{map_number}.json", logger.session_id()));
+    let json = serde_json::to_string_pretty(world)?;
+    fs::write(&path, json)?;
+    Ok(path)
 }
