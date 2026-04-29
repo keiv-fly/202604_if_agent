@@ -29,11 +29,18 @@ pub enum PlannerDecisionKind {
 pub struct CommandPlan {
     pub commands: Vec<String>,
     pub route_commands: Vec<String>,
+    pub route_steps: Vec<RouteStep>,
     pub frontier_action_command: String,
     pub start_location_key: String,
     pub frontier_source_location_key: String,
     pub selected_frontier_action_id: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteStep {
+    pub command: String,
+    pub expected_destination: String,
 }
 
 #[derive(Debug, Clone)]
@@ -167,19 +174,18 @@ impl DfsPlanner {
             };
         }
 
-        let mut selected: Option<(usize, Vec<String>)> =
-            self.frontier
-                .iter()
-                .enumerate()
-                .find_map(|(index, action)| {
-                    if action.status == FrontierStatus::Pending
-                        && action.source_location_key == current
-                    {
-                        Some((index, Vec::new()))
-                    } else {
-                        None
-                    }
-                });
+        let mut selected: Option<(usize, Vec<RouteStep>)> = self
+            .frontier
+            .iter()
+            .enumerate()
+            .find_map(|(index, action)| {
+                if action.status == FrontierStatus::Pending && action.source_location_key == current
+                {
+                    Some((index, Vec::new()))
+                } else {
+                    None
+                }
+            });
 
         let graph = known_route_graph(world);
         for (index, action) in self.frontier.iter().enumerate() {
@@ -215,7 +221,12 @@ impl DfsPlanner {
         };
 
         let action = self.frontier[index].clone();
-        let mut commands = route_commands.clone();
+        let route_steps = route_commands;
+        let mut commands = route_steps
+            .iter()
+            .map(|step| step.command.clone())
+            .collect::<Vec<_>>();
+        let route_commands = commands.clone();
         commands.push(action.command.clone());
         self.stats.generated_command_plans += 1;
 
@@ -225,6 +236,7 @@ impl DfsPlanner {
             plan: Some(CommandPlan {
                 commands,
                 route_commands,
+                route_steps,
                 frontier_action_command: action.command,
                 start_location_key: current,
                 frontier_source_location_key: action.source_location_key,
@@ -592,10 +604,10 @@ fn route_between(
     graph: &HashMap<String, Vec<(String, String)>>,
     start: &str,
     goal: &str,
-) -> Option<Vec<String>> {
+) -> Option<Vec<RouteStep>> {
     let mut queue = VecDeque::new();
     let mut seen = HashSet::new();
-    queue.push_back((start.to_string(), Vec::<String>::new()));
+    queue.push_back((start.to_string(), Vec::<RouteStep>::new()));
     seen.insert(start.to_string());
 
     while let Some((location, path)) = queue.pop_front() {
@@ -607,7 +619,10 @@ fn route_between(
                 continue;
             }
             let mut next_path = path.clone();
-            next_path.push(command.clone());
+            next_path.push(RouteStep {
+                command: command.clone(),
+                expected_destination: next.clone(),
+            });
             queue.push_back((next.clone(), next_path));
         }
     }
@@ -618,7 +633,7 @@ fn route_between(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::world::Location;
+    use crate::memory::world::{Exit, Location};
 
     fn world_at(location: &str, description: &str) -> WorldModel {
         let mut world = WorldModel::default();
@@ -643,6 +658,63 @@ mod tests {
             Some(plan.selected_frontier_action_id),
             world,
         )
+    }
+
+    #[test]
+    fn route_plan_records_expected_destination_for_known_step() {
+        let mut world = world_at("A", "You are in room A.");
+        world.locations.insert(
+            "B".to_string(),
+            Location {
+                title: "B".to_string(),
+                description: "You are in room B.".to_string(),
+                exits: vec![Exit {
+                    direction: "north".to_string(),
+                    destination: Some("C".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        world
+            .locations
+            .get_mut("A")
+            .expect("location A")
+            .exits
+            .push(Exit {
+                direction: "east".to_string(),
+                destination: Some("B".to_string()),
+                ..Default::default()
+            });
+
+        let mut planner = DfsPlanner::new(&world);
+        planner.frontier.clear();
+        for command in CANONICAL_MOVES {
+            planner
+                .attempted
+                .insert(("A".to_string(), command.to_string()));
+        }
+        planner.frontier.push(FrontierAction {
+            id: "frontier-test".to_string(),
+            source_location_key: "B".to_string(),
+            command: "north".to_string(),
+            expected_destination: None,
+            status: FrontierStatus::Pending,
+            priority: 1,
+            reason: "test frontier".to_string(),
+            discovery_turn: 0,
+            last_attempted_turn: None,
+            failure_reason: None,
+        });
+
+        let decision = planner.decide(&world);
+        let plan = decision.plan.expect("expected route command plan");
+
+        assert_eq!(plan.commands, vec!["east".to_string(), "north".to_string()]);
+        assert_eq!(plan.route_commands, vec!["east".to_string()]);
+        assert_eq!(plan.route_steps.len(), 1);
+        assert_eq!(plan.route_steps[0].command, "east");
+        assert_eq!(plan.route_steps[0].expected_destination, "B");
     }
 
     #[test]

@@ -578,6 +578,19 @@ fn run_dfs_strategy(
                     .first()
                     .context("planner returned empty command plan")?
                     .clone();
+                if let Some(step) = plan.route_steps.first() {
+                    if step.command != command {
+                        bail!(
+                            "DFS route step command '{}' did not match first planned command '{}'",
+                            step.command,
+                            command
+                        );
+                    }
+                }
+                let expected_route_destination = plan
+                    .route_steps
+                    .first()
+                    .map(|step| step.expected_destination.clone());
                 let action_id = if plan.route_commands.is_empty() {
                     Some(plan.selected_frontier_action_id.clone())
                 } else {
@@ -666,6 +679,26 @@ fn run_dfs_strategy(
                     },
                     &world,
                 );
+
+                if let Some(expected) = expected_route_destination {
+                    let actual = location_key(&world);
+                    if actual != expected {
+                        logger.log(
+                            "planner_route_mismatch",
+                            &format!(
+                                "command={command} expected_location={expected} actual_location={actual} action={} route_len_remaining={} repair=replan_from_actual_location",
+                                plan.selected_frontier_action_id,
+                                plan.route_commands.len().saturating_sub(1),
+                            ),
+                        );
+                        print_eval_message(
+                            logger,
+                            &format!(
+                                "Known DFS transition landed at {actual:?}, expected {expected:?}; replanning from current location."
+                            ),
+                        );
+                    }
+                }
             }
             PlannerDecisionKind::Complete => {
                 print_eval_message(logger, &format!("DFS complete: {}", decision.reason));
