@@ -30,6 +30,8 @@ pub struct Exit {
     pub destination: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub transition_counts: HashMap<String, usize>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unstable: bool,
 }
 
 impl WorldModel {
@@ -156,6 +158,7 @@ impl WorldModel {
                         direction,
                         destination: None,
                         transition_counts: HashMap::new(),
+                        unstable: false,
                     });
                 }
             }
@@ -259,12 +262,16 @@ impl WorldModel {
             .iter_mut()
             .find(|known| known.direction == direction)
         {
-            existing.destination = destination.clone();
             if count_transition {
-                if let Some(destination) = destination {
-                    *existing.transition_counts.entry(destination).or_insert(0) += 1;
+                if let Some(destination) = &destination {
+                    *existing
+                        .transition_counts
+                        .entry(destination.clone())
+                        .or_insert(0) += 1;
                 }
             }
+            existing.unstable = existing.transition_counts.len() > 1;
+            existing.destination = preferred_destination(existing, destination.as_deref());
         } else {
             let mut transition_counts = HashMap::new();
             if count_transition {
@@ -276,6 +283,7 @@ impl WorldModel {
                 direction: direction.to_string(),
                 destination,
                 transition_counts,
+                unstable: false,
             });
         }
     }
@@ -354,6 +362,24 @@ impl WorldModel {
             }
         }
     }
+}
+
+fn preferred_destination(exit: &Exit, fallback: Option<&str>) -> Option<String> {
+    exit.transition_counts
+        .iter()
+        .max_by(
+            |(left_destination, left_count), (right_destination, right_count)| {
+                left_count
+                    .cmp(right_count)
+                    .then_with(|| right_destination.cmp(left_destination))
+            },
+        )
+        .map(|(destination, _)| destination.clone())
+        .or_else(|| fallback.map(ToOwned::to_owned))
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn normalize_direction(command: &str) -> Option<String> {
@@ -670,5 +696,29 @@ mod tests {
             key.strip_prefix("In Forest.#").expect("hash suffix").len(),
             7
         );
+    }
+
+    #[test]
+    fn repeated_command_results_mark_probabilistic_exit_unstable() {
+        let mut world = WorldModel::default();
+        world.current_location = "A".to_string();
+
+        world.apply_command_result_with_destination("A", "east", Some("B"));
+        world.apply_command_result_with_destination("A", "east", Some("B"));
+        world.apply_command_result_with_destination("A", "east", Some("C"));
+
+        let exit = world
+            .locations
+            .get("A")
+            .expect("source location")
+            .exits
+            .iter()
+            .find(|exit| exit.direction == "east")
+            .expect("east exit");
+
+        assert_eq!(exit.transition_counts.get("B"), Some(&2));
+        assert_eq!(exit.transition_counts.get("C"), Some(&1));
+        assert_eq!(exit.destination.as_deref(), Some("B"));
+        assert!(exit.unstable);
     }
 }

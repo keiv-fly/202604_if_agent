@@ -18,6 +18,8 @@ pub const CANONICAL_MOVES: [&str; 12] = [
     "out",
 ];
 
+const MAX_RECOVERY_ATTEMPTS_PER_FRONTIER: usize = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlannerDecisionKind {
     CommandPlan,
@@ -34,6 +36,8 @@ pub struct CommandPlan {
     pub start_location_key: String,
     pub frontier_source_location_key: String,
     pub selected_frontier_action_id: String,
+    #[serde(default)]
+    pub is_recovery: bool,
     pub reason: String,
 }
 
@@ -106,6 +110,7 @@ pub struct DfsPlanner {
     frontier: Vec<FrontierAction>,
     attempted: HashSet<(String, String)>,
     blocked_edges: HashMap<String, HashMap<String, BlockedEdge>>,
+    recovery_attempts: HashMap<String, usize>,
     next_frontier_id: usize,
     pub stats: PlannerStats,
 }
@@ -144,6 +149,7 @@ impl DfsPlanner {
             frontier: Vec::new(),
             attempted: HashSet::new(),
             blocked_edges: HashMap::new(),
+            recovery_attempts: HashMap::new(),
             next_frontier_id: 1,
             stats: PlannerStats::default(),
         };
@@ -207,10 +213,23 @@ impl DfsPlanner {
                 .iter()
                 .any(|action| action.status == FrontierStatus::Pending)
             {
+                if let Some(plan) = self.recovery_plan(world, &graph, &current) {
+                    self.stats.generated_command_plans += 1;
+                    return PlannerDecision {
+                        kind: PlannerDecisionKind::CommandPlan,
+                        reason: format!(
+                            "selected recovery move for unreachable pending frontier {}",
+                            plan.selected_frontier_action_id
+                        ),
+                        plan: Some(plan),
+                    };
+                }
                 return PlannerDecision {
                     kind: PlannerDecisionKind::Blocked,
                     plan: None,
-                    reason: "pending frontier exists, but no known route reaches it".to_string(),
+                    reason:
+                        "pending frontier exists, but no known route or recovery move reaches it"
+                            .to_string(),
                 };
             }
             return PlannerDecision {
@@ -241,6 +260,7 @@ impl DfsPlanner {
                 start_location_key: current,
                 frontier_source_location_key: action.source_location_key,
                 selected_frontier_action_id: action.id,
+                is_recovery: false,
                 reason: "deterministic DFS frontier order".to_string(),
             }),
         }
@@ -451,6 +471,68 @@ impl DfsPlanner {
             });
         }
     }
+
+    fn recovery_plan(
+        &mut self,
+        world: &WorldModel,
+        graph: &HashMap<String, Vec<RouteEdge>>,
+        current: &str,
+    ) -> Option<CommandPlan> {
+        let pending_frontier = self.frontier.iter().find(|action| {
+            action.status == FrontierStatus::Pending
+                && self
+                    .recovery_attempts
+                    .get(&action.id)
+                    .copied()
+                    .unwrap_or_default()
+                    < MAX_RECOVERY_ATTEMPTS_PER_FRONTIER
+        })?;
+
+        let candidates = unstable_recovery_edges(world);
+        let mut selected: Option<(Vec<RouteStep>, String, String)> = None;
+        for candidate in candidates {
+            let route = if candidate.source == current {
+                Vec::new()
+            } else if let Some(route) = route_between(graph, current, &candidate.source) {
+                route
+            } else {
+                continue;
+            };
+
+            if selected
+                .as_ref()
+                .map(|(existing_route, _, _)| route.len() < existing_route.len())
+                .unwrap_or(true)
+            {
+                selected = Some((route, candidate.source, candidate.command));
+            }
+        }
+
+        let (route_steps, source, command) = selected?;
+        *self
+            .recovery_attempts
+            .entry(pending_frontier.id.clone())
+            .or_insert(0) += 1;
+
+        let mut commands = route_steps
+            .iter()
+            .map(|step| step.command.clone())
+            .collect::<Vec<_>>();
+        let route_commands = commands.clone();
+        commands.push(command.clone());
+
+        Some(CommandPlan {
+            commands,
+            route_commands,
+            route_steps,
+            frontier_action_command: command,
+            start_location_key: current.to_string(),
+            frontier_source_location_key: source,
+            selected_frontier_action_id: pending_frontier.id.clone(),
+            is_recovery: true,
+            reason: "bounded DFS recovery via unstable transition".to_string(),
+        })
+    }
 }
 
 pub fn normalize_move_command(command: &str) -> Option<String> {
@@ -581,27 +663,55 @@ fn raw_output_hash(text: &str) -> String {
     format!("{hash:016x}")
 }
 
-fn known_route_graph(world: &WorldModel) -> HashMap<String, Vec<(String, String)>> {
-    let mut graph: HashMap<String, Vec<(String, String)>> = HashMap::new();
+#[derive(Debug, Clone)]
+struct RouteEdge {
+    destination: String,
+    command: String,
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryEdge {
+    source: String,
+    command: String,
+}
+
+fn known_route_graph(world: &WorldModel) -> HashMap<String, Vec<RouteEdge>> {
+    let mut graph: HashMap<String, Vec<RouteEdge>> = HashMap::new();
     for (source, location) in &world.locations {
         for exit in &location.exits {
-            let Some(destination) = &exit.destination else {
-                continue;
-            };
             let Some(command) = normalize_move_command(&exit.direction) else {
                 continue;
             };
-            graph
-                .entry(source.clone())
-                .or_default()
-                .push((destination.clone(), command));
+            let mut destinations = exit
+                .transition_counts
+                .iter()
+                .map(|(destination, count)| (destination.clone(), *count))
+                .collect::<Vec<_>>();
+            if destinations.is_empty() {
+                if let Some(destination) = &exit.destination {
+                    destinations.push((destination.clone(), 0));
+                }
+            }
+            destinations.sort_by(
+                |(left_destination, left_count), (right_destination, right_count)| {
+                    right_count
+                        .cmp(left_count)
+                        .then_with(|| left_destination.cmp(right_destination))
+                },
+            );
+            for (destination, _) in destinations {
+                graph.entry(source.clone()).or_default().push(RouteEdge {
+                    destination,
+                    command: command.clone(),
+                });
+            }
         }
     }
     graph
 }
 
 fn route_between(
-    graph: &HashMap<String, Vec<(String, String)>>,
+    graph: &HashMap<String, Vec<RouteEdge>>,
     start: &str,
     goal: &str,
 ) -> Option<Vec<RouteStep>> {
@@ -614,20 +724,44 @@ fn route_between(
         if location == goal {
             return Some(path);
         }
-        for (next, command) in graph.get(&location).into_iter().flatten() {
-            if !seen.insert(next.clone()) {
+        for edge in graph.get(&location).into_iter().flatten() {
+            if !seen.insert(edge.destination.clone()) {
                 continue;
             }
             let mut next_path = path.clone();
             next_path.push(RouteStep {
-                command: command.clone(),
-                expected_destination: next.clone(),
+                command: edge.command.clone(),
+                expected_destination: edge.destination.clone(),
             });
-            queue.push_back((next.clone(), next_path));
+            queue.push_back((edge.destination.clone(), next_path));
         }
     }
 
     None
+}
+
+fn unstable_recovery_edges(world: &WorldModel) -> Vec<RecoveryEdge> {
+    let mut edges = Vec::new();
+    for (source, location) in &world.locations {
+        for exit in &location.exits {
+            if !exit.unstable && exit.transition_counts.len() <= 1 {
+                continue;
+            }
+            let Some(command) = normalize_move_command(&exit.direction) else {
+                continue;
+            };
+            edges.push(RecoveryEdge {
+                source: source.clone(),
+                command,
+            });
+        }
+    }
+    edges.sort_by(|left, right| {
+        left.source
+            .cmp(&right.source)
+            .then_with(|| left.command.cmp(&right.command))
+    });
+    edges
 }
 
 #[cfg(test)]
@@ -715,6 +849,112 @@ mod tests {
         assert_eq!(plan.route_steps.len(), 1);
         assert_eq!(plan.route_steps[0].command, "east");
         assert_eq!(plan.route_steps[0].expected_destination, "B");
+    }
+
+    #[test]
+    fn route_plan_can_follow_non_primary_probabilistic_destination() {
+        let mut world = world_at("A", "You are in room A.");
+        world.locations.insert(
+            "B".to_string(),
+            Location {
+                title: "B".to_string(),
+                description: "You are in room B.".to_string(),
+                ..Default::default()
+            },
+        );
+        world.locations.insert(
+            "C".to_string(),
+            Location {
+                title: "C".to_string(),
+                description: "You are in room C.".to_string(),
+                exits: vec![Exit {
+                    direction: "north".to_string(),
+                    destination: Some("D".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        world.apply_command_result_with_destination("A", "east", Some("B"));
+        world.apply_command_result_with_destination("A", "east", Some("B"));
+        world.apply_command_result_with_destination("A", "east", Some("C"));
+
+        let mut planner = DfsPlanner::new(&world);
+        planner.frontier.clear();
+        for command in CANONICAL_MOVES {
+            planner
+                .attempted
+                .insert(("A".to_string(), command.to_string()));
+        }
+        planner.frontier.push(FrontierAction {
+            id: "frontier-test".to_string(),
+            source_location_key: "C".to_string(),
+            command: "north".to_string(),
+            expected_destination: None,
+            status: FrontierStatus::Pending,
+            priority: 1,
+            reason: "test frontier".to_string(),
+            discovery_turn: 0,
+            last_attempted_turn: None,
+            failure_reason: None,
+        });
+
+        let decision = planner.decide(&world);
+        let plan = decision.plan.expect("expected route command plan");
+
+        assert_eq!(plan.commands, vec!["east".to_string(), "north".to_string()]);
+        assert_eq!(plan.route_steps[0].expected_destination, "C");
+    }
+
+    #[test]
+    fn unreachable_frontier_uses_bounded_recovery_move() {
+        let mut world = world_at("A", "You are in room A.");
+        world.locations.insert(
+            "B".to_string(),
+            Location {
+                title: "B".to_string(),
+                description: "You are in room B.".to_string(),
+                ..Default::default()
+            },
+        );
+        world.locations.insert(
+            "C".to_string(),
+            Location {
+                title: "C".to_string(),
+                description: "You are in room C.".to_string(),
+                ..Default::default()
+            },
+        );
+        world.apply_command_result_with_destination("A", "east", Some("B"));
+        world.apply_command_result_with_destination("A", "east", Some("C"));
+
+        let mut planner = DfsPlanner::new(&world);
+        planner.frontier.clear();
+        for command in CANONICAL_MOVES {
+            planner
+                .attempted
+                .insert(("A".to_string(), command.to_string()));
+        }
+        planner.frontier.push(FrontierAction {
+            id: "frontier-test".to_string(),
+            source_location_key: "Z".to_string(),
+            command: "north".to_string(),
+            expected_destination: None,
+            status: FrontierStatus::Pending,
+            priority: 1,
+            reason: "test frontier".to_string(),
+            discovery_turn: 0,
+            last_attempted_turn: None,
+            failure_reason: None,
+        });
+
+        let decision = planner.decide(&world);
+        let plan = decision.plan.expect("expected recovery command plan");
+
+        assert_eq!(decision.kind, PlannerDecisionKind::CommandPlan);
+        assert!(plan.is_recovery);
+        assert_eq!(plan.commands, vec!["east".to_string()]);
+        assert_eq!(plan.selected_frontier_action_id, "frontier-test");
     }
 
     #[test]

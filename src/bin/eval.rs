@@ -591,7 +591,7 @@ fn run_dfs_strategy(
                     .route_steps
                     .first()
                     .map(|step| step.expected_destination.clone());
-                let action_id = if plan.route_commands.is_empty() {
+                let action_id = if plan.route_commands.is_empty() && !plan.is_recovery {
                     Some(plan.selected_frontier_action_id.clone())
                 } else {
                     None
@@ -601,9 +601,10 @@ fn run_dfs_strategy(
                 logger.log(
                     "planner_command",
                     &format!(
-                        "command={command} selected={} route_len={} reason={}",
+                        "command={command} selected={} route_len={} recovery={} reason={}",
                         plan.selected_frontier_action_id,
                         plan.route_commands.len(),
+                        plan.is_recovery,
                         plan.reason
                     ),
                 );
