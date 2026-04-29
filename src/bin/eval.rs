@@ -186,7 +186,7 @@ fn main() -> Result<()> {
             logger.log("eval_run_start", &format!("run={run}/{}", args.runs));
             let run_result = run_program(&args.command, args.strategy, args.dfs_max_turns, &logger)
                 .with_context(|| format!("failed during eval run {run}"))?;
-            write_final_map_artifact(&logger, run, &run_result.world)
+            write_final_map_artifact(&logger, run, &run_result.world, &first_nodes)
                 .with_context(|| format!("failed to write final map for eval run {run}"))?;
             write_world_model_exit_to_artifacts(&logger, run, &run_result.world, &first_nodes)
                 .with_context(|| format!("failed to write exit_to artifacts for eval run {run}"))?;
@@ -241,17 +241,86 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn write_final_map_artifact(logger: &SessionLogger, run: usize, world: &WorldModel) -> Result<()> {
+#[derive(Debug, Serialize)]
+struct FinalMapLocation {
+    title: String,
+    description: String,
+    exits: BTreeMap<String, BTreeMap<String, usize>>,
+}
+
+fn write_final_map_artifact(
+    logger: &SessionLogger,
+    run: usize,
+    world: &WorldModel,
+    first_nodes: &HashMap<String, FirstNode>,
+) -> Result<()> {
     let path = logger
         .llm_dir()
         .join(format!("run-{run:03}-final-map.json"));
-    let json = serde_json::to_string_pretty(world).context("serialize final map to JSON")?;
+    let json = serde_json::to_string_pretty(&final_map_artifact(world, first_nodes))
+        .context("serialize final map to JSON")?;
     fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
     logger.log(
         "eval_final_map",
         &format!("run={run} path={}", path.display()),
     );
     Ok(())
+}
+
+fn final_map_artifact(
+    world: &WorldModel,
+    first_nodes: &HashMap<String, FirstNode>,
+) -> BTreeMap<String, FinalMapLocation> {
+    let node_ids = first_node_ids_by_location(first_nodes);
+    let mut locations = BTreeMap::new();
+
+    for (source_key, location) in &world.locations {
+        let source = node_id_for_world_model_location(source_key, location, &node_ids);
+        let mut exits = BTreeMap::<String, BTreeMap<String, usize>>::new();
+
+        for exit in &location.exits {
+            let Some(command) = final_map_move_command(&exit.direction) else {
+                continue;
+            };
+            let destinations = exits.entry(command).or_default();
+
+            if exit.transition_counts.is_empty() {
+                if let Some(destination) = exit.destination.as_ref() {
+                    destinations
+                        .entry(node_id_for_world_model_destination(
+                            destination,
+                            world,
+                            first_nodes,
+                            &node_ids,
+                        ))
+                        .or_insert(0);
+                }
+                continue;
+            }
+
+            for (destination, count) in &exit.transition_counts {
+                *destinations
+                    .entry(node_id_for_world_model_destination(
+                        destination,
+                        world,
+                        first_nodes,
+                        &node_ids,
+                    ))
+                    .or_insert(0) += *count;
+            }
+        }
+
+        locations.insert(
+            source,
+            FinalMapLocation {
+                title: location.title.clone(),
+                description: location.description.clone(),
+                exits,
+            },
+        );
+    }
+
+    locations
 }
 
 fn write_world_state_exit_to_artifacts(
@@ -1067,6 +1136,23 @@ fn world_model_exit_items(
             let Some(direction) = normalize_move_command(&exit.direction) else {
                 continue;
             };
+
+            if !exit.transition_counts.is_empty() {
+                for destination in exit.transition_counts.keys() {
+                    exit_items.push(ExitItem {
+                        source: source.clone(),
+                        direction: direction.clone(),
+                        destination: node_id_for_world_model_destination(
+                            destination,
+                            world,
+                            first_nodes,
+                            &node_ids,
+                        ),
+                    });
+                }
+                continue;
+            }
+
             let Some(destination) = exit.destination.as_ref() else {
                 continue;
             };
@@ -1085,6 +1171,28 @@ fn world_model_exit_items(
     }
 
     exit_items
+}
+
+fn final_map_move_command(direction: &str) -> Option<String> {
+    let command = normalize_move_command(direction)?;
+    Some(
+        match command.as_str() {
+            "north" => "n",
+            "south" => "s",
+            "east" => "e",
+            "west" => "w",
+            "northeast" => "ne",
+            "northwest" => "nw",
+            "southeast" => "se",
+            "southwest" => "sw",
+            "up" => "u",
+            "down" => "d",
+            "in" => "in",
+            "out" => "out",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 fn first_node_ids_by_location(
@@ -1300,4 +1408,66 @@ where
         *counts.entry(item.clone()).or_insert(0) += 1;
     }
     counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memory::world::Location;
+
+    #[test]
+    fn final_map_exits_use_command_abbreviations_and_transition_counts() {
+        let mut world = WorldModel::default();
+        world.current_location = "Start".to_string();
+        world.locations.insert(
+            "Start".to_string(),
+            Location {
+                title: "Start".to_string(),
+                description: "You are at the start.".to_string(),
+                ..Default::default()
+            },
+        );
+        world.locations.insert(
+            "Forest".to_string(),
+            Location {
+                title: "Forest".to_string(),
+                description: "You are in the forest.".to_string(),
+                ..Default::default()
+            },
+        );
+
+        world.apply_command_result_with_destination("Start", "north", Some("Forest"));
+        world.apply_command_result_with_destination("Start", "n", Some("Forest"));
+
+        let first_nodes = HashMap::from([
+            (
+                "start".to_string(),
+                FirstNode {
+                    title: "Start".to_string(),
+                    description: "You are at the start.".to_string(),
+                    exits: HashMap::new(),
+                    exits_to: HashMap::new(),
+                },
+            ),
+            (
+                "forest".to_string(),
+                FirstNode {
+                    title: "Forest".to_string(),
+                    description: "You are in the forest.".to_string(),
+                    exits: HashMap::new(),
+                    exits_to: HashMap::new(),
+                },
+            ),
+        ]);
+
+        let final_map = final_map_artifact(&world, &first_nodes);
+
+        assert_eq!(
+            final_map
+                .get("start")
+                .and_then(|location| location.exits.get("n"))
+                .and_then(|destinations| destinations.get("forest")),
+            Some(&2)
+        );
+    }
 }

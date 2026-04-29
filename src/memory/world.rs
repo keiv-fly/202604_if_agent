@@ -28,6 +28,8 @@ pub struct Location {
 pub struct Exit {
     pub direction: String,
     pub destination: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub transition_counts: HashMap<String, usize>,
 }
 
 impl WorldModel {
@@ -104,7 +106,7 @@ impl WorldModel {
             .map(str::trim)
             .filter(|destination| !destination.is_empty())
             .map(ToOwned::to_owned);
-        self.set_exit(previous_location, &direction, destination.clone());
+        self.set_exit(previous_location, &direction, destination.clone(), true);
 
         let Some(dest) = destination else {
             return;
@@ -113,7 +115,7 @@ impl WorldModel {
             return;
         }
         if let Some(reverse) = reverse_direction(&direction) {
-            self.set_exit(&dest, reverse, Some(previous_location.to_string()));
+            self.set_exit(&dest, reverse, Some(previous_location.to_string()), false);
         }
     }
 
@@ -153,6 +155,7 @@ impl WorldModel {
                     location.exits.push(Exit {
                         direction,
                         destination: None,
+                        transition_counts: HashMap::new(),
                     });
                 }
             }
@@ -236,7 +239,13 @@ impl WorldModel {
         self.rekey_same_title_locations(title, description)
     }
 
-    fn set_exit(&mut self, from: &str, direction: &str, destination: Option<String>) {
+    fn set_exit(
+        &mut self,
+        from: &str,
+        direction: &str,
+        destination: Option<String>,
+        count_transition: bool,
+    ) {
         let location = self
             .locations
             .entry(from.to_string())
@@ -250,11 +259,23 @@ impl WorldModel {
             .iter_mut()
             .find(|known| known.direction == direction)
         {
-            existing.destination = destination;
+            existing.destination = destination.clone();
+            if count_transition {
+                if let Some(destination) = destination {
+                    *existing.transition_counts.entry(destination).or_insert(0) += 1;
+                }
+            }
         } else {
+            let mut transition_counts = HashMap::new();
+            if count_transition {
+                if let Some(destination) = &destination {
+                    transition_counts.insert(destination.clone(), 1);
+                }
+            }
             location.exits.push(Exit {
                 direction: direction.to_string(),
                 destination,
+                transition_counts,
             });
         }
     }
